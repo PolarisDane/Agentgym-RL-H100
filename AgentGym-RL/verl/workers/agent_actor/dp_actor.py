@@ -676,6 +676,11 @@ class DataParallelPPOActor(BasePPOActor):
                 if loss_mask.sum().item() == 0:
                     continue
 
+                # per-sample group-norm weight (mean 1; identity when absent).
+                # Must be read BEFORE the loss call -- it now goes INTO the
+                # token-level aggregation instead of scaling the result.
+                lw = micro['loss_weight'] if 'loss_weight' in micro.keys() else None
+
                 with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
                     output = self.actor_module(
                         input_ids=micro['input_ids'],
@@ -687,18 +692,19 @@ class DataParallelPPOActor(BasePPOActor):
                         logits=output.logits,
                         labels=micro['input_ids'],
                         loss_mask=loss_mask,
+                        sample_weight=lw,
                     )
 
-                # per-sample group-norm weight (mean 1; identity when absent)
-                lw = micro['loss_weight'] if 'loss_weight' in micro.keys() else None
-                w = lw.to(pf_loss.dtype).mean() if lw is not None else 1.0
-                loss = coef * w * pf_loss / gradient_accumulation
+                loss = coef * pf_loss / gradient_accumulation
                 loss.backward()
 
                 append_to_dict(metrics, {
                     f'{mp}/sft_loss': pf_loss.detach().item(),
                     f'{mp}/coef': coef,
-                    f'{mp}/loss_weight_mean': (float(w.item()) if lw is not None else 1.0),
+                    # mean is ~1 by construction; std is what says whether the
+                    # weights actually separate samples in this micro-batch.
+                    f'{mp}/loss_weight_mean': (float(lw.mean().item()) if lw is not None else 1.0),
+                    f'{mp}/loss_weight_std': (float(lw.float().std().item()) if (lw is not None and lw.numel() > 1) else 0.0),
                     f'{mp}/valid_tokens': loss_mask.sum().detach().item(),
                 })
 

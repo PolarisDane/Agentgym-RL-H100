@@ -303,10 +303,22 @@ def compute_world_model_sft_loss_from_logits(
     logits: torch.Tensor,
     labels: torch.Tensor,
     loss_mask: torch.Tensor,
+    sample_weight: torch.Tensor = None,
 ) -> torch.Tensor:
     """Next-token CE loss on the positions marked by ``loss_mask``.
 
     ``logits``: (B, T, V); ``labels``: (B, T); ``loss_mask``: (B, T).
+
+    ``sample_weight`` (optional, shape [B]): per-sample weight applied at TOKEN
+    level, i.e. inside the aggregation. Numerator and denominator are weighted
+    alike, so the result stays a weighted MEAN and the loss scale does not move
+    with the weights. ``None`` reproduces the unweighted form bit-for-bit.
+
+    Why token-level and not a scalar multiply on the aggregated loss: the
+    per-sample weights (e.g. plan-forecast group-norm) must change the RELATIVE
+    contribution of samples to each other. Multiplying the already-aggregated
+    scalar by ``sample_weight.mean()`` cannot do that -- it only rescales the
+    whole micro-batch and leaves every sample's share untouched.
     """
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = labels[:, 1:].contiguous()
@@ -320,7 +332,12 @@ def compute_world_model_sft_loss_from_logits(
     loss_fn = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
     tok_loss = loss_fn(shift_logits.view(-1, vocab), ignored_labels.view(-1))
     tok_loss = tok_loss.view(shift_labels.shape)   # ignored positions already 0
-    denom = shift_mask.sum().clamp(min=1.0)
+    if sample_weight is None:
+        denom = shift_mask.sum().clamp(min=1.0)
+        return tok_loss.sum() / denom
+    w = sample_weight.to(tok_loss.dtype).view(-1, 1)          # [B,1] -> broadcast
+    tok_loss = tok_loss * w
+    denom = (shift_mask.to(tok_loss.dtype) * w).sum().clamp(min=1.0)
     return tok_loss.sum() / denom
 
 
