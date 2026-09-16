@@ -96,6 +96,76 @@ def _webshop_obs_target_mask(content: str, tokenizer) -> tuple:
     return mask, dropped, n, False
 
 
+# ---------------------------------------------------------------------------
+# [thinking-model 适配] Qwen3 等混合推理模型默认会先生成 <think>...</think>。
+# agent rollout 每轮只给 512 token，thinking 会把预算吃光，且干扰 Thought/Action 解析。
+# 关闭方式是官方的 enable_thinking=False —— 它不是删标签，而是在生成提示末尾预置一个
+# 空的 <think>\n\n</think>\n\n，让模型认为已思考完。
+#
+# 因此 assistat_prefix_msg 必须与 apply_chat_template 的产物**逐 token 一致**：
+# add_assistant_message 靠 input_ids 的精确后缀匹配来判断该给哪段 loss mask，
+# 两者不一致会直接抛 ValueError。
+#
+# 这里不写死，而是探测 tokenizer 本身：把 enable_thinking=False 传进去，若输出变化则
+# 说明是 thinking 模型。Qwen2.5 等旧模型对未知 kwarg 静默忽略、输出不变，走原分支。
+_THINKING_CACHE: dict = {}
+
+def _supports_thinking(tokenizer) -> bool:
+    key = getattr(tokenizer, "name_or_path", None) or id(tokenizer)
+    if key in _THINKING_CACHE:
+        return _THINKING_CACHE[key]
+    probe = [{"role": "user", "content": "x"}]
+    try:
+        default = tokenizer.apply_chat_template(probe, add_generation_prompt=True, tokenize=False)
+        nothink = tokenizer.apply_chat_template(probe, add_generation_prompt=True, tokenize=False,
+                                                enable_thinking=False)
+        res = (default != nothink)
+    except Exception:
+        res = False
+    _THINKING_CACHE[key] = res
+    return res
+
+
+def _thinking_kwargs(tokenizer) -> dict:
+    return {"enable_thinking": False} if _supports_thinking(tokenizer) else {}
+
+
+def _assistant_prefix(tokenizer) -> str:
+    """生成提示前缀，与 apply_chat_template(**_thinking_kwargs) 的尾部保持一致。"""
+    base = "\n<|im_start|>assistant\n"
+    return base + "<think>\n\n</think>\n\n" if _supports_thinking(tokenizer) else base
+# ---------------------------------------------------------------------------
+
+
+
+def _action_token_mask(tokenizer, content: str, response_ids, task_name: str):
+    """返回与 response_ids 等长的 bool 列表，标出**裸动作**所在的 token。
+
+    TE 的 q_t 是动作串上的分布，所以 log π^0 必须只对动作 token 求和 ——
+    带上 Thought 推理段会让它与成员侧（只覆盖裸动作）差 9 倍 token 数，
+    序列级 log-prob 相差 10~28 nats，KL 项随之失去意义。
+
+    用 return_offsets_mapping 做字符→token 映射（实测 2307/2307 个动作都是
+    content 的字面子串）。任何一步失败都退回"全标"，与修改前行为一致 ——
+    宁可退化成旧口径，也不要静默丢掉整轮。
+    """
+    n = len(response_ids)
+    try:
+        from verl.agent_trainer.ppo.plan_forecast import extract_action
+        act = extract_action(content, env=(task_name or "").lower())
+        if not act:
+            return [True] * n
+        cs = content.rindex(act)
+        ce = cs + len(act)
+        enc = tokenizer(content, add_special_tokens=False, return_offsets_mapping=True)
+        offs = enc["offset_mapping"]
+        if len(offs) != n:                 # 与 encode(content) 的切分不一致，放弃
+            return [True] * n
+        mask = [(a < ce and b > cs) for (a, b) in offs]
+        return mask if any(mask) else [True] * n
+    except Exception:
+        return [True] * n
+
 class RolloutHandler:
     def __init__(
         self,
@@ -150,6 +220,15 @@ class RolloutHandler:
         self.wm_obs_dropped = 0      # obs tokens excluded from the WM-SFT target
         self.wm_obs_total = 0        # obs tokens seen (denominator for the metric)
         self.wm_obs_failsafe = 0     # pages where the structure check bailed out
+        # --- Temporal Ensembling: 每个 token 属于第几个动作轮（-1 = 非动作正文）---
+        # 纯追加字段，不触碰 input_ids / loss_mask / attention_mask / position_ids /
+        # observation_mask 中的任何一个。不改 __init__ 签名，所以构造点零改动。
+        # 即使 TE 关闭也维护（开销是一次 list 追加）；只有 te_enable 时才放进 batch
+        # （见 vllm_rollout.py 的门控），对正常训练零影响。
+        self.turn_ids = [-1] * len(self.input_ids)
+        self.prompt_turn_ids = [-1] * len(self.prompt_ids)
+        self.response_turn_ids = []
+        self._assistant_turn = -1    # 第一次 add_assistant_message 后变 0
         self.format_config: dict = {
             "qwen": {
                 "assistat_prefix_msg": "\n<|im_start|>assistant\n",
@@ -163,7 +242,8 @@ class RolloutHandler:
         conversations = [
             msg.to_dict() for msg in self.messages
         ]
-        return tokenizer.apply_chat_template(conversations, add_generation_prompt=True, tokenize=True)
+        return tokenizer.apply_chat_template(conversations, add_generation_prompt=True,
+                                             tokenize=True, **_thinking_kwargs(tokenizer))
     
     
     def add_assistant_message(
@@ -175,17 +255,28 @@ class RolloutHandler:
         msg = Message(role='assistant', content=content)
         self.messages.append(msg)
         assert format in self.format_config.keys(), f"format {format} not supported"
-        prefix_msg = self.format_config[format]["assistat_prefix_msg"]
+        prefix_msg = _assistant_prefix(tokenizer)   # 随模型自动切换（thinking / 非 thinking）
         prefix_token_ids = tokenizer.encode(prefix_msg, add_special_tokens=False)
         suffix_msg = self.format_config[format]["assistat_suffix_msg"]
         suffix_token_ids = tokenizer.encode(suffix_msg, add_special_tokens=False)
         response = tokenizer.encode(content, add_special_tokens=False)
+        self._assistant_turn += 1
+        _t = self._assistant_turn
+        # TE 口径：turn_ids 只标**裸动作**的 token，不含 Thought 推理段。
+        # 2026-09-15 修正：此前标的是整个 assistant 内容（实测平均 49 token），
+        # 而 TE 成员侧的 slot span 只覆盖 extract_action 抽出的裸动作（5.3 token）。
+        # 两侧 token 数差 9.2 倍 -> 序列级 log-prob 相差 10~28 nats，
+        # 这个差值几乎全部来自长度而非集成质量，使 KL 项比较了两个不可比的量。
+        # q_t 按定义就是**动作串**上的分布，所以两侧都必须是裸动作。
+        _act_mask = _action_token_mask(tokenizer, content, response, self.task_name)
         if self.input_ids[-len(prefix_token_ids) :] == prefix_token_ids:
             append_token_ids = response
             _loss_mask = [1] * len(response)
+            _turn = [_t if m else -1 for m in _act_mask]
         elif self.input_ids[-len(suffix_token_ids) :] == suffix_token_ids:
             append_token_ids = prefix_token_ids + response
             _loss_mask = [0] * len(prefix_token_ids) + [1] * len(response)
+            _turn = [-1] * len(prefix_token_ids) + [_t if m else -1 for m in _act_mask]
         else:
             max_len = max(len(prefix_token_ids), len(suffix_token_ids))
             raise ValueError(
@@ -194,6 +285,9 @@ class RolloutHandler:
             )
         append_token_ids += suffix_token_ids
         _loss_mask += [1] * len(suffix_token_ids)
+        # TE: suffix(<|im_end|>) 不算动作正文 —— q_t 是动作串上的分布，带上模板
+        # token 会让 log π^0 与 log π^k 的口径不一致。
+        _turn += [-1] * len(suffix_token_ids)
         _observation_mask = [0] * len(append_token_ids)
         self.input_ids += append_token_ids
         _attention_mask = [1] * len(append_token_ids)
@@ -204,6 +298,8 @@ class RolloutHandler:
         self.loss_mask += _loss_mask
         self.observation_mask += _observation_mask
         self.position_ids += _position_ids
+        assert len(_turn) == len(append_token_ids), (len(_turn), len(append_token_ids))
+        self.turn_ids += _turn
         assert len(self.input_ids) == len(self.attention_mask) == len(self.position_ids) == len(self.loss_mask) == len(self.observation_mask), f"""Rollout Handler has different length of {len(self.input_ids)=}, 
             {len(self.attention_mask)=}, {len(self.position_ids)=}, {len(self.loss_mask)=}, {len(self.observation_mask)=}"""
         
@@ -261,6 +357,7 @@ class RolloutHandler:
         self.loss_mask += _loss_mask
         self.observation_mask += _observation_mask
         self.position_ids += _position_ids
+        self.turn_ids += [-1] * len(append_token_ids)   # TE: 观测 token 不属于任何动作轮
         assert len(self.input_ids) == len(self.attention_mask) == len(self.position_ids) == len(self.loss_mask) == len(self.observation_mask), f"""Rollout Handler has different length of {len(self.input_ids)=},
             {len(self.attention_mask)=}, {len(self.position_ids)=}, {len(self.loss_mask)=}, {len(self.observation_mask)=}"""
         
@@ -275,3 +372,4 @@ class RolloutHandler:
         self.response_position_ids = self.position_ids[len(self.prompt_position_ids) :][: self.max_response_len]
         self.response_loss_mask = self.loss_mask[len(self.prompt_loss_mask) :][: self.max_response_len]
         self.response_observation_mask = self.observation_mask[len(self.prompt_observation_mask) :][: self.max_response_len]
+        self.response_turn_ids = self.turn_ids[len(self.prompt_turn_ids) :][: self.max_response_len]

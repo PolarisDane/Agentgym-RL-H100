@@ -337,6 +337,7 @@ class vLLMRollout(BaseRollout):
         # process ids
         rollout_bar.close()
         response_ids, response_attention_mask, response_position_ids, response_loss_mask, response_observation_mask = [], [], [], [], []
+        response_turn_ids = []   # TE: 每个 response token 属于第几个动作轮（-1=非动作正文）
         scores, messages = [], []
         
         for rollout_handler in rollout_handler_ls:
@@ -350,6 +351,7 @@ class vLLMRollout(BaseRollout):
             response_attention_mask.append(torch.tensor(rollout_handler.response_attention_mask, dtype=torch.int, device=cur_device))
             response_position_ids.append(torch.tensor(rollout_handler.response_position_ids, dtype=torch.int, device=cur_device))
             response_loss_mask.append(torch.tensor(rollout_handler.response_loss_mask, dtype=torch.int, device=cur_device))
+            response_turn_ids.append(torch.tensor(getattr(rollout_handler, 'response_turn_ids', []) or [-1]*len(rollout_handler.response_loss_mask), dtype=torch.long, device=cur_device))
             response_observation_mask.append(torch.tensor(rollout_handler.response_observation_mask, dtype=torch.int, device=cur_device))
             scores.append(self._shape_task_reward(
                 task_score=rollout_handler.score,
@@ -371,6 +373,10 @@ class vLLMRollout(BaseRollout):
         response_observation_mask = pad_sequence(response_observation_mask, batch_first=True, padding_value=0)
         if response_observation_mask.shape[1] < self.config.response_length:
             response_observation_mask = pad_sequence_to_length(response_observation_mask, self.config.response_length, 0)
+        # TE: padding 用 -1，**不能用 0** —— 0 是合法轮号，用 0 会把 padding 误算进第 0 轮
+        response_turn_ids = pad_sequence(response_turn_ids, batch_first=True, padding_value=-1)
+        if response_turn_ids.shape[1] < self.config.response_length:
+            response_turn_ids = pad_sequence_to_length(response_turn_ids, self.config.response_length, -1)
         response_length = response_ids.size(1)
         delta_position_ids = torch.arange(1, response_length + 1, device=cur_device)
         delta_position_ids = delta_position_ids.unsqueeze(0).repeat(batch_size, 1)
@@ -441,6 +447,11 @@ class vLLMRollout(BaseRollout):
                 'task_scores': reward_tensor
             },
             batch_size=batch_size)
+
+        # --- Temporal Ensembling: 仅在 te_enable 时把 turn_ids 放进 batch ---
+        # 关闭时 batch 的 key 集合与改动前完全一致 -> 对正常训练零影响。
+        if bool(self.config.get('te_enable', False)):
+            batch['turn_ids'] = response_turn_ids[:, :response_length]
 
         # Expose per-sample chat history so downstream passes (e.g. the
         # world-model SFT update) can re-assemble fresh chat-template data

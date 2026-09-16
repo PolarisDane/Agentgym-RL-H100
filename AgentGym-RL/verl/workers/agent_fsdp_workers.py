@@ -523,6 +523,44 @@ class ActorRolloutRefWorker(Worker):
         return output
 
     @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
+    def compute_te_log_prob(self, data: DataProto):
+        """Temporal Ensembling：冻结 θ̄ 打分（纯推理，不动优化器、不走 lr_scheduler）。
+
+        只在 te_enable=True 时被 ray_trainer 调用。返回两个张量，都放在 batch 里：
+          slot_logp     [B, K]                  序列级（te_mix='seq'）
+          slot_logp_tok [B, K, TE_SLOT_MAX_TOK] 逐 token（te_mix='token'，默认）
+        """
+        data = data.to('cuda')
+        assert self._is_actor
+        if self._is_offload_param:
+            load_fsdp_param_and_grad(module=self.actor_module_fsdp,
+                                     device_id=torch.cuda.current_device(),
+                                     load_grad=self._is_offload_grad)
+        data.batch = data.batch.cuda()
+        with self.ulysses_sharding_manager:
+            data = self.ulysses_sharding_manager.preprocess_data(data=data)
+            with Timer(name='compute_te_log_prob', logger=None) as timer:
+                slot_lp, slot_lp_tok, topm_ids, topm_prs = \
+                    self.actor.compute_te_log_prob(data=data)
+            # 两个都必须走 batch（DP_COMPUTE_PROTO 只拼接张量，不拼 meta_info）。
+            # slot_logp_tok 是 [B, K, TE_SLOT_MAX_TOK]，逐 token 混合用。
+            from tensordict import TensorDict
+            output = DataProto(
+                batch=TensorDict({'slot_logp': slot_lp.cpu(),
+                                  'slot_logp_tok': slot_lp_tok.cpu(),
+                                  'slot_topm_ids': topm_ids.cpu(),
+                                  'slot_topm_prs': topm_prs.cpu()},
+                                 batch_size=slot_lp.shape[0]),
+                meta_info={'te/score_time': timer.last})
+            output = self.ulysses_sharding_manager.postprocess_data(data=output)
+            output = output.to('cpu')
+        if self._is_offload_param:
+            offload_fsdp_param_and_grad(module=self.actor_module_fsdp,
+                                        offload_grad=self._is_offload_grad)
+        torch.cuda.empty_cache()
+        return output
+
+    @register(dispatch_mode=Dispatch.DP_COMPUTE_PROTO)
     def generate_sequences(self, prompts: DataProto):
         prompts = prompts.to('cuda')
 

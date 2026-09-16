@@ -308,17 +308,6 @@ def compute_world_model_sft_loss_from_logits(
     """Next-token CE loss on the positions marked by ``loss_mask``.
 
     ``logits``: (B, T, V); ``labels``: (B, T); ``loss_mask``: (B, T).
-
-    ``sample_weight`` (optional, shape [B]): per-sample weight applied at TOKEN
-    level, i.e. inside the aggregation. Numerator and denominator are weighted
-    alike, so the result stays a weighted MEAN and the loss scale does not move
-    with the weights. ``None`` reproduces the unweighted form bit-for-bit.
-
-    Why token-level and not a scalar multiply on the aggregated loss: the
-    per-sample weights (e.g. plan-forecast group-norm) must change the RELATIVE
-    contribution of samples to each other. Multiplying the already-aggregated
-    scalar by ``sample_weight.mean()`` cannot do that -- it only rescales the
-    whole micro-batch and leaves every sample's share untouched.
     """
     shift_logits = logits[:, :-1, :].contiguous()
     shift_labels = labels[:, 1:].contiguous()
@@ -332,13 +321,25 @@ def compute_world_model_sft_loss_from_logits(
     loss_fn = torch.nn.CrossEntropyLoss(reduction='none', ignore_index=-100)
     tok_loss = loss_fn(shift_logits.view(-1, vocab), ignored_labels.view(-1))
     tok_loss = tok_loss.view(shift_labels.shape)   # ignored positions already 0
+    # ``sample_weight`` (可选, shape [B]): 每样本权重，只乘进分子，分母保持
+    # 未加权的 token 数。这样总梯度 = Σ_i w_i·∇L_i（L_i 为样本 i 的平均 CE），
+    # **与 micro_batch_size 的切分方式无关**。
+    #
+    # 为什么分母不能乘 w（这是 2026-09-04 那版修复的 bug）：
+    #   加权均值 Σ(w_i·S_i)/Σ(w_i·n_i) 在 B=1 时分子分母是同一个 w_1，直接约掉，
+    #   权重完全失效。而本仓库 ppo_micro_batch_size_per_gpu=1、
+    #   world_model_micro_batch_size_per_gpu 未设置 -> micro_batch 恒为 1，
+    #   于是那版"修复"反而把 group_norm 关掉了。
+    #   梯度级实测（micro_batch=1）: 修复后 cos(g, g_无权)=1.000000，逐元素相同。
+    #
+    # 样本之间的相对关系在 micro_batch=1 时发生在**梯度累加**层面（加法），
+    # 不是在 micro-batch 内部取平均，所以正确做法是让 w_i 缩放该样本的整份损失。
     if sample_weight is None:
         denom = shift_mask.sum().clamp(min=1.0)
         return tok_loss.sum() / denom
-    w = sample_weight.to(tok_loss.dtype).view(-1, 1)          # [B,1] -> broadcast
-    tok_loss = tok_loss * w
-    denom = (shift_mask.to(tok_loss.dtype) * w).sum().clamp(min=1.0)
-    return tok_loss.sum() / denom
+    w = sample_weight.to(tok_loss.dtype).view(-1, 1)      # [B,1] 广播到 [B,T]
+    denom = shift_mask.sum().clamp(min=1.0)               # 注意：不乘 w
+    return (tok_loss * w).sum() / denom
 
 
 def compute_traj_lm_loss(log_prob, response_mask, obs_mask, row_mask=None):

@@ -50,9 +50,12 @@ from verl.agent_trainer.ppo.plan_forecast import (
     parse_k_schedule,
     active_k_range,
 )
-from verl.agent_trainer.ppo.sft_ablation import (
-    build_sft_ablation_batch,
-)
+try:
+    from verl.agent_trainer.ppo.sft_ablation import (
+        build_sft_ablation_batch,
+    )
+except ImportError:  # module not present in this checkout
+    build_sft_ablation_batch = None
 from verl.utils.seqlen_balancing import get_seqlen_balanced_partitions, log_seqlen_unbalance
 from verl.utils.checkpoint.checkpoint_manager import find_latest_ckpt_path
 from verl.utils.agent_dataset.rl_dataset import RLHFDataset, collate_fn
@@ -1021,6 +1024,152 @@ class RayPPOTrainer(object):
                                                   cutoff_step=int(actor_cfg.get('plan_forecast_coef_cutoff_step', 0)))
         raise NotImplementedError(f"unknown plan_forecast_coef_anneal: {anneal}")
 
+    def _compute_temporal_ensemble(self, batch):
+        """Temporal Ensembling：就地给 batch 加上 te_log_q / te_valid，返回指标。
+
+        整个流程都在 θ̄ 下完成（rollout 之后、optimizer step 之前）：
+          1. 每条轨迹的每个动作轮 -> 一条 forecast 打分样本
+          2. 冻结前向，取每个 slot 的序列级 log π^k(a_t|h_s)
+          3. 按真实轮号（t > s）筛成员，与 old_log_probs 的 π^0 分量混合成 log q_t
+
+        te_lambda=0 时仍然执行（dry-run 模式）：只上报 te/gain_win 等诊断指标，
+        不参与梯度 —— 这是判断方法是否成立的关键一步，见设计文档 §1。
+        """
+        from verl.agent_trainer.ppo.temporal_ensemble import (
+            build_te_batch, assemble_te_tensors, assemble_te_tensors_token,
+            assemble_te_topm)
+        import random as _random
+        acfg = self.config.actor_rollout_ref.actor
+        msgs = batch.non_tensor_batch.get('rollout_messages', None)
+        if msgs is None or 'turn_ids' not in batch.batch.keys():
+            return {'te/skipped': 1.0}
+
+        k = int(acfg.get('plan_forecast_k', 3))
+        te_batch, index, meta = build_te_batch(
+            msgs, self.tokenizer, k=k,
+            skip_invalid=bool(acfg.get('plan_forecast_skip_invalid', True)),
+            env=str(self.config.actor_rollout_ref.agentgym.task_name),
+            max_length=int(acfg.get('plan_forecast_max_length', 4096)),
+            pad_token_id=self.tokenizer.pad_token_id or 0,
+            traj_subsample=float(acfg.get('te_traj_subsample', 1.0)),
+            rng=_random.Random(self.global_steps),
+        )
+        if te_batch is None:
+            return meta
+
+        from verl.protocol import pad_dataproto_to_divisor   # 顶部已 import，这里显式取以免遮蔽
+        te_padded, pad_n = pad_dataproto_to_divisor(te_batch, self.actor_rollout_wg.world_size)
+        out = self.actor_rollout_wg.compute_te_log_prob(te_padded)
+        # te_mix: 'token'(默认) 逐 token 混合 / 'seq' 序列级混合（旧行为，已证实退化，
+        # 保留仅为可复现对照）。见设计文档 2026-09-15 补记。
+        te_mix = str(acfg.get('te_mix', 'token')).lower()
+        _t = out.batch['slot_logp']                 # [B, K]，跨 worker 已拼接
+        if pad_n:
+            _t = _t[:_t.shape[0] - pad_n]
+        slot_lp = [[float(x) for x in row] for row in _t.tolist()]
+        slot_tok_lp = None
+        if te_mix in ('token', 'fullvocab'):
+            _tt = out.batch['slot_logp_tok']        # [B, K, TMAX]
+            if pad_n:
+                _tt = _tt[:_tt.shape[0] - pad_n]
+            slot_tok_lp = []
+            for sample in _tt.tolist():
+                row = []
+                for slot in sample:
+                    toks = []
+                    for v in slot:                  # 尾部 NaN 是 padding，遇到即停
+                        if v != v:
+                            break
+                        toks.append(float(v))
+                    row.append(toks)
+                slot_tok_lp.append(row)
+        meta['te/score_time'] = float(out.meta_info.get('te/score_time', 0.0))
+
+        # 2026-09-15 修复：TE 在 old_log_prob 之后就跑，而 token_level_scores /
+        # traj_return 要到本轮更后面(ray_trainer ~1509/1514 行)才写入 batch ——
+        # 之前 tret 恒为 None，导致 gain_win / gain_fail **从未被计算**（smoke 里
+        # 只有 gain_all 就是这个原因）。而这两个指标恰恰是判断方法能否成立的依据。
+        # rollout 产出的 'scores' [bsz, resp_len] 在 TE 之前就已 union 进 batch，
+        # 每条轨迹的分数放在最后一个有效位置，求和即得 per-traj return。
+        tret = batch.batch.get('traj_return', None)
+        if tret is None and 'token_level_scores' in batch.batch.keys():
+            tret = batch.batch['token_level_scores'].sum(-1)
+        if tret is None and 'scores' in batch.batch.keys():
+            tret = batch.batch['scores'].sum(-1)
+        _eta = float(acfg.get('te_eta', 0.5))
+        if te_mix == 'fullvocab':
+            # 全词表模式：只需要 top-M 张量；te_log_q/te_valid 不进 batch
+            # （dp_actor 的 fullvocab 分支不读它们，门控走 te_cov_pos）。
+            _ti = out.batch['slot_topm_ids']
+            _tp = out.batch['slot_topm_prs']
+            if pad_n:
+                _ti = _ti[:_ti.shape[0] - pad_n]
+                _tp = _tp[:_tp.shape[0] - pad_n]
+            cov_pos, cov_ids, cov_prs, m2 = assemble_te_topm(
+                index, _ti, _tp, turn_ids=batch.batch['turn_ids'])
+            batch.batch['te_cov_pos'] = cov_pos
+            batch.batch['te_cov_ids'] = cov_ids
+            batch.batch['te_cov_prs'] = cov_prs
+            # 诊断指标仍按逐 token 口径算一份（不写回 batch，不进梯度）
+            try:
+                _, _, m_tok = assemble_te_tensors_token(
+                    index, slot_tok_lp if slot_tok_lp is not None else [],
+                    old_log_probs=batch.batch['old_log_probs'],
+                    turn_ids=batch.batch['turn_ids'], eta=_eta, traj_return=tret)
+                for _k, _v in m_tok.items():
+                    m2.setdefault(_k, _v)
+            except Exception:
+                pass
+            m2['te/mix_is_token'] = 2.0
+            meta.update(m2)
+            lam = float(acfg.get('te_lambda', 0.0))
+            if self.global_steps < int(acfg.get('te_warmup_steps', 0)):
+                lam = 0.0
+            batch.meta_info['te_lambda'] = lam
+            batch.meta_info['te_gbar'] = 0.0
+            meta['te/lambda_effective'] = lam
+            return meta
+        if te_mix == 'token':
+            te_log_q, te_valid, m2 = assemble_te_tensors_token(
+                index, slot_tok_lp,
+                old_log_probs=batch.batch['old_log_probs'],
+                turn_ids=batch.batch['turn_ids'],
+                eta=_eta, traj_return=tret)
+            # 逐 token 模式额外跑一次序列级 assemble，只为继续上报可比的
+            # gain_all / gain_tok_* 诊断指标（不写回 batch，不影响梯度）。
+            try:
+                _, _, m_seq = assemble_te_tensors(
+                    index, slot_lp,
+                    old_log_probs=batch.batch['old_log_probs'],
+                    turn_ids=batch.batch['turn_ids'],
+                    eta=_eta, traj_return=tret)
+                for _k in ('te/gain_all', 'te/span_len_mean'):
+                    if _k in m_seq:
+                        m2.setdefault(_k, m_seq[_k])
+            except Exception:
+                pass
+        else:
+            te_log_q, te_valid, m2 = assemble_te_tensors(
+                index, slot_lp,
+                old_log_probs=batch.batch['old_log_probs'],
+                turn_ids=batch.batch['turn_ids'],
+                eta=_eta, traj_return=tret)
+        m2['te/mix_is_token'] = 1.0 if te_mix == 'token' else 0.0
+        batch.batch['te_log_q'] = te_log_q
+        batch.batch['te_valid'] = te_valid
+        # 共模基线走 meta_info 传给 actor（标量，不能进 batch：DP_COMPUTE_PROTO
+        # 会按样本切分张量）。必须是 batch 级的量，见 assemble_te_tensors_token 注释。
+        _gb = m2.get('te/g_bar', float('nan'))
+        batch.meta_info['te_gbar'] = float(_gb) if _gb == _gb else 0.0
+        meta.update(m2)
+        # λ 的 warmup：前 N 步只观测不施加梯度
+        lam = float(acfg.get('te_lambda', 0.0))
+        if self.global_steps < int(acfg.get('te_warmup_steps', 0)):
+            lam = 0.0
+        batch.meta_info['te_lambda'] = lam
+        meta['te/lambda_effective'] = lam
+        return meta
+
     def _build_plan_forecast_dataproto(self, batch: DataProto, coef: float):
         """Build a plan-forecast SFT DataProto (predict realized next-K actions).
 
@@ -1119,6 +1268,11 @@ class RayPPOTrainer(object):
         actor_cfg = self.config.actor_rollout_ref.actor
         if not actor_cfg.get('sft_ablation_enable', False):
             return None, {}
+        if build_sft_ablation_batch is None:
+            raise ImportError(
+                "sft_ablation_enable=True but verl.agent_trainer.ppo.sft_ablation "
+                "is missing from this checkout."
+            )
         if coef <= 0:
             return None, {'sft_ablation/coef': 0.0}
 
@@ -1411,6 +1565,16 @@ class RayPPOTrainer(object):
                     #     posinf=0.0,      # log prob 不应该 > 0，但兜底
                     #     neginf=-10.0,    # 这是核心防护
                     # )
+
+                    # ---- Temporal Ensembling：用 θ̄ 给成员打分并合成 q_t ----
+                    # 必须放在 old_log_prob 之后（π^0 分量取自 old_log_probs）、
+                    # 任何 optimizer step 之前（此时权重就是论文的 θ̄）。
+                    # te_enable=False 时整段跳过，batch 的 key 集合与改动前一致。
+                    _te_cfg = self.config.actor_rollout_ref.actor
+                    if bool(_te_cfg.get('te_enable', False)):
+                        with _timer('te_log_prob', timing_raw):
+                            te_metrics = self._compute_temporal_ensemble(batch)
+                        metrics.update(te_metrics)
 
                     if self.use_reference_policy:
                         # compute reference log_prob

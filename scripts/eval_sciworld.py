@@ -40,9 +40,17 @@ except ImportError:
     sys.exit(1)
 
 # Defaults
-DEFAULT_TEST_FILE = (
-    REPO_ROOT / "AgentItemId" / "test" / "sciworld_test.json"
+# Official AgentGym-RL-Data-ID eval split (200 items, identical to AgentEval's
+# sciworld_test.json). The legacy in-repo path is kept as a fallback.
+DEFAULT_TEST_FILE = Path(
+    os.environ.get(
+        "SCIWORLD_TEST_FILE",
+        "/data1/datasets/AgentGym-RL-Data-ID/eval/sciworld_test.json",
+    )
 )
+LEGACY_TEST_FILE = REPO_ROOT / "AgentItemId" / "test" / "sciworld_test.json"
+if not DEFAULT_TEST_FILE.exists() and LEGACY_TEST_FILE.exists():
+    DEFAULT_TEST_FILE = LEGACY_TEST_FILE
 DEFAULT_MAX_ROUNDS = 30
 DEFAULT_MAX_TOKENS = 200
 DEFAULT_TEMPERATURE = 1.0
@@ -191,8 +199,8 @@ class EnvPool:
 # ---------------------------------------------------------------------------
 def load_test_ids(test_file: Path) -> list[int]:
     if not test_file.exists():
-        print(f"Warning: {test_file} not found.")
-        return []
+        print(f"ERROR: test id file {test_file} not found. Pass --test-file.")
+        sys.exit(1)
     with test_file.open("r", encoding="utf-8") as f:
         rows = json.load(f)
     
@@ -238,6 +246,12 @@ def main():
     parser.add_argument("--max-tokens", type=int, default=DEFAULT_MAX_TOKENS)
     parser.add_argument("--temp", type=float, default=DEFAULT_TEMPERATURE)
     parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)
+    parser.add_argument(
+        "--test-file",
+        type=Path,
+        default=DEFAULT_TEST_FILE,
+        help=f"JSON list of test item ids (default: {DEFAULT_TEST_FILE})",
+    )
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
@@ -245,7 +259,8 @@ def main():
     args.output_dir.mkdir(parents=True, exist_ok=True)
     env_addrs = [s.strip() for s in args.env_addrs.split(",") if s.strip()]
     
-    test_ids = load_test_ids(DEFAULT_TEST_FILE)
+    test_ids = load_test_ids(args.test_file)
+    print(f"[data] test ids: {len(test_ids)} from {args.test_file}")
     if args.limit > 0:
         test_ids = test_ids[:args.limit]
 

@@ -4,6 +4,7 @@ import os
 import time
 from agentenv.envs import (
     AcademiaEnvClient,
+    AppWorldEnvClient,
     AlfWorldEnvClient,
     BabyAIEnvClient,
     MazeEnvClient,
@@ -66,6 +67,7 @@ def init_env_client(args):
     envclient_classes = {
         "webshop": WebshopEnvClient,
         "alfworld": AlfWorldEnvClient,
+        "appworld": AppWorldEnvClient,
         "babyai": BabyAIEnvClient,
         "sciworld": SciworldEnvClient,
         "textcraft": TextCraftEnvClient,

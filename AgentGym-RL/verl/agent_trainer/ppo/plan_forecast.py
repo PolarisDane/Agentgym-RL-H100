@@ -162,13 +162,30 @@ def _to_chat_list(messages) -> List[Dict[str, str]]:
     return out
 
 
-def extract_action(assistant_text: str) -> str:
+# code-as-action 环境（动作是 markdown fenced code block，没有 "Action:" 标记）。
+# 对这些环境必须抽整个代码块：走默认分支会命中"最后一个非空行"，而那正好是闭合的
+# ``` —— 实测 appworld 轨迹每一轮都抽成 '```'，plan 的监督目标会变成让模型预测
+# "接下来三个动作是 ```、```、```"，是纯噪声。
+_CODE_AS_ACTION_ENVS = ("appworld",)
+_FENCE_RE = re.compile(r"```(?:python)?\s*\n(.*?)```", re.S)
+
+
+def extract_action(assistant_text: str, env: str = "") -> str:
     """The bare action command from an assistant turn (drops the Thought).
 
     Mirrors progress_credit_probe.parse_action: take the first non-empty line
     after ``Action:``; fall back to the last non-empty line for bare-action envs.
     Returns '' for empty/degenerate turns (e.g. the trailing terminal turn).
+
+    ``env`` in _CODE_AS_ACTION_ENVS -> 抽最后一个 fenced code block（与
+    AppWorldEnvClient.step 的抽取逻辑一致，保证 plan 目标 == 真正执行的动作）。
+    默认 env="" 时行为与改动前完全一致，其他环境不受影响。
     """
+    if (env or "").lower() in _CODE_AS_ACTION_ENVS:
+        blocks = _FENCE_RE.findall(assistant_text or "")
+        if blocks:
+            return blocks[-1].strip()
+        return ""
     m = re.search(r"Action:\s*(.+)", assistant_text or "", re.S)
     if not m:
         lines = [l.strip() for l in (assistant_text or "").splitlines() if l.strip()]
@@ -256,6 +273,15 @@ INVALID_OUTCOME_PATTERNS = {
     "sciworld": ("invalid action", "no known action matches that input"),
     "webshop": ("invalid action",),
     "babyai": ("invalid action",),
+    # appworld 是 code-as-action：环境级「无效/无副作用」只有两种 —— 代码崩了、
+    # 或压根没抽出可执行代码。实测 step55-75 全量 9344 条观测:
+    #   Execution failed. Traceback: ...   2964 (31.7%)
+    #   No code available to execute.        94 ( 1.0%)
+    # 注意不要把 "login failed" / "response status code is 401" 算进来 —— 那是模型
+    # 自己 print 的业务失败，代码执行是成功的、动作是有副作用的，与 alfworld 的
+    # "nothing happens" 不同层级。
+    "appworld": ("invalid action", "execution failed", "no code available to execute",
+                 "environment not reset"),
 }
 
 
@@ -291,7 +317,7 @@ def build_plan_targets(messages, k: int = 3, skip_invalid: bool = False,
     """
     convo = _to_chat_list(messages)
     action_idxs = _action_turn_indices(convo)
-    actions_seq = [extract_action(convo[ai]['content']) for ai in action_idxs]
+    actions_seq = [extract_action(convo[ai]['content'], env=env) for ai in action_idxs]
     ach = achieved_subgoals(messages)   # [(text, step_idx)] hindsight-confirmed milestones
 
     if skip_invalid:
@@ -314,9 +340,22 @@ def build_plan_targets(messages, k: int = 3, skip_invalid: bool = False,
             fut = [a for a in actions_seq[n:n + k] if a]
         if not fut:
             continue
+        # --- Temporal Ensembling 用：每个 slot 对应的真实动作轮序号 ---
+        # 上面 fut 的计算**一字未改**；这里并行推导同一批元素的下标，并断言两者
+        # 逐元素一致。TE 需要 slot->轮号 的映射才能把 q_t 对到正确的目标时刻，
+        # 而 skip_invalid=True 时 slot 偏移 != 轮间隔（会跳过无效动作）。
+        if skip_invalid:
+            sel = [j for j in range(n, len(actions_seq))
+                   if actions_seq[j] and valid_seq[j]][:k]
+        else:
+            sel = [n + o for o, a in enumerate(actions_seq[n:n + k]) if a]
+        assert [actions_seq[j] for j in sel] == fut, (
+            "action_turns 推导与 fut 不一致 —— 说明两处构造逻辑已漂移，必须修复；"
+            f"n={n} sel={sel} fut={fut}")
         # next-K sub-goals that actually complete at or after this step (hindsight)
         fut_sub = [text for (text, sn) in ach if sn >= n][:k]
-        out.append({'prefix_end': ai - 1, 'actions': fut, 'subgoals': fut_sub})
+        out.append({'prefix_end': ai - 1, 'actions': fut, 'subgoals': fut_sub,
+                    'action_turns': sel, 'src_turn': n})
     return out
 
 
@@ -631,7 +670,7 @@ def build_plan_forecast_batch(
             gid = group_ids[i] if (group_ids is not None and i < len(group_ids)) else i
             # dedup key = the trajectory's realized action sequence (full, original)
             _cv = _to_chat_list(messages)
-            seq_key = tuple(extract_action(_cv[a].get("content", "")) for a in _action_turn_indices(_cv))
+            seq_key = tuple(extract_action(_cv[a].get("content", ""), env=env) for a in _action_turn_indices(_cv))
             traj_records.append((gid, len(traj_samples), _start, seq_key))
 
     # Group-weight normalization: each GROUP contributes equally (total weight 1 after
@@ -711,11 +750,35 @@ def build_plan_forecast_batch(
             _byg[gid].append(seq)
         # per-group distinct-fraction: unique seqs / trajectories (1.0 = no dup in group)
         _ratios = [len(set(v)) / len(v) for v in _byg.values() if v]
+        # Batch-level spread of the per-sample weights. This is THE number that says
+        # whether group_norm actually separates samples: mean is 1.0 by construction
+        # (renormalized above), so only the spread carries information.
+        #
+        # Must be computed HERE, over the whole assembled batch. The same statistic
+        # logged inside the optimizer loop (dp_actor: plan_forecast/loss_weight_std)
+        # is computed per MICRO-batch, and world_model_micro_batch_size_per_gpu falls
+        # back to ppo_micro_batch_size_per_gpu — which is 1 in every current config.
+        # A 1-element tensor has no spread, so that metric reads 0.000 forever and
+        # says nothing about whether the weighting works. (Observed 2026-09-05 on
+        # sciworld: loss_weight_std=0.000 for 50 steps while group_n_distilled=8 and
+        # succ_traj_per_group_mean=5.75 -> 46 trajectories over 8 groups, which cannot
+        # divide evenly, so the weights provably DID differ.)
+        _w = [float(x.get("loss_weight", 1.0)) for x in all_samples]
+        if len(_w) > 1:
+            _wm = sum(_w) / len(_w)
+            _wsd = (sum((x - _wm) ** 2 for x in _w) / (len(_w) - 1)) ** 0.5
+        else:
+            _wm, _wsd = (_w[0] if _w else 1.0), 0.0
         meta.update({
             "plan_forecast/group_n_distilled": float(len(_mg)),
             "plan_forecast/group_succ_traj_per_group_mean": float(sum(_mg.values()) / len(_mg)),
             "plan_forecast/group_dedup": 1.0 if group_dedup else 0.0,
             "plan_forecast/group_unique_frac": float(sum(_ratios) / len(_ratios)) if _ratios else 1.0,
+            # batch-level (see comment above); distinct from dp_actor's micro-batch one
+            "plan_forecast/batch_loss_weight_mean": float(_wm),
+            "plan_forecast/batch_loss_weight_std": float(_wsd),
+            "plan_forecast/batch_loss_weight_min": float(min(_w)) if _w else 1.0,
+            "plan_forecast/batch_loss_weight_max": float(max(_w)) if _w else 1.0,
         })
     if target == "subgoal":
         # done-marking health: is the LLM actually checking sub-goals off?

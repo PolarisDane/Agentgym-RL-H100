@@ -6,21 +6,26 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRAIN_CODE_DIR="${ROOT}/AgentGym-RL"
 CONDA_SH="${CONDA_SH:-/usr/local/miniconda3/etc/profile.d/conda.sh}"
 TRAIN_ENV="${TRAIN_ENV:-agentgym-rl}"
-MODEL_PATH="${MODEL_PATH:-/data1/models/Qwen2.5-7B-Instruct}"
-TASK_NAME="sciworld"
+MODEL_PATH="${MODEL_PATH:-/data1/models/Qwen2.5-14B-Instruct}"
+TASK_NAME="appworld"
 
 export HF_HUB_OFFLINE=1
 export WANDB_MODE=offline
 
 ENV_ADDR_HOST="${ENV_ADDR_HOST:-127.0.0.1}"
-BASE_PORT="${BASE_PORT:-36101}"
-CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-4,5,6,7}"
+BASE_PORT="${BASE_PORT:-36301}"
+CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 IFS=',' read -r -a GPU_ARRAY <<< "${CUDA_VISIBLE_DEVICES}"
 NUM_GPUS="${#GPU_ARRAY[@]}"
 
-# 必须与 launch_sciworld_grpo_tmux.sh 的 ENVS_PER_GPU 一致，否则训练侧构造的地址
-# 数量和实际起的 server 数对不上。默认 1 = 与历史 run 相同的 1 卡 1 server。
-ENVS_PER_GPU="${ENVS_PER_GPU:-1}"
+# 每张 GPU 对应多个 env server：AppWorld 的 env.step 是同步 FastAPI + 纯 Python，
+# 单进程会被 GIL 串行化。verl 侧 _select_env_addr 会把地址列表按 rank 切成连续分片，
+# 每个 rank 在自己的分片内轮询，所以这里要铺开 NUM_GPUS*ENVS_PER_GPU 个地址。
+# 2026-08-31: 4 -> 16。AppWorld 的 supervisor "当前活跃任务" 是进程级全局状态，
+# 同一进程内并存的多个 AppWorld 实例共用它：任一 episode 调 complete_task，同进程
+# 其余 episode 会被立刻判 done 并用被污染的状态跑 evaluate()。并发轨迹数固定为
+# TRAIN_BATCH_SIZE*ROLLOUT_N=128，故进程数必须也是 128 才能一对一隔离。
+ENVS_PER_GPU="${ENVS_PER_GPU:-16}"
 NUM_ENVS=$((NUM_GPUS * ENVS_PER_GPU))
 
 # Automatically construct comma-separated list of environment addresses
@@ -36,30 +41,48 @@ for i in $(seq 0 $((NUM_ENVS - 1))); do
 done
 ENV_ADDR="${ENV_ADDR:-${ENV_ADDR_LIST}}"
 echo "Using ENV_ADDR: ${ENV_ADDR}"
+echo "  NUM_GPUS=${NUM_GPUS} ENVS_PER_GPU=${ENVS_PER_GPU} NUM_ENVS=${NUM_ENVS}"
 
 WANDB_MODE="${WANDB_MODE:-offline}"
-PROJECT_NAME="${PROJECT_NAME:-agentgym-sciworld}"
+PROJECT_NAME="${PROJECT_NAME:-agentgym-appworld}"
 
-KL_COEF="${KL_COEF:-0.001}"
+KL_COEF="${KL_COEF:-0.01}"
 ENTROPY_COEF="${ENTROPY_COEF:-0.001}"
 POLICY_LR="${POLICY_LR:-1e-6}"
 ROLLOUT_N="${ROLLOUT_N:-8}"
+ROLLOUT_TEMPERATURE="${ROLLOUT_TEMPERATURE:-1.0}"  # config 默认 1.0；降低可减少长程生成退化
 TRAIN_BATCH_SIZE="${TRAIN_BATCH_SIZE:-16}"
-PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-8}"
+PPO_MINI_BATCH_SIZE="${PPO_MINI_BATCH_SIZE:-64}"
 PPO_MICRO_BATCH_SIZE_PER_GPU="${PPO_MICRO_BATCH_SIZE_PER_GPU:-1}"
+# 32k 上下文下，单条满长序列的 fp32 logits = 24576*151936*4 = 13.9 GiB，超出可用显存。
+# micro_batch 已是 1 无法再降，故开 dynamic_bsz 按 token 数切分前向/反向。
+USE_DYNAMIC_BSZ="${USE_DYNAMIC_BSZ:-False}"
+PPO_MAX_TOKEN_LEN_PER_GPU="${PPO_MAX_TOKEN_LEN_PER_GPU:-24576}"
+# 2026-08-31: 30 轮下 max_seq_len=34816，单序列 logits 分配 9.30 GiB 超出可用 8.82 GiB
+# 而 OOM（差 0.48 GiB）。开序列并行把单条序列切到 2 张卡上算，该分配减半到约 4.65 GiB。
+# 代价：DP 8->4（PPO_MINI_BATCH_SIZE 64/4=16 可整除），通信增加约 10-20%。
+# 依赖 USE_REMOVE_PADDING=True（已开）。仅 appworld 脚本，其他环境不受影响。
+ULYSSES_SP="${ULYSSES_SP:-1}"
+# Adam 状态(20.7 GiB/卡)挪到 CPU，腾出显存给更长的 response。
+# 效果接近 LoRA(24.1 GiB)但无需改共享 worker 代码，不影响其他环境。
+OPTIMIZER_OFFLOAD="${OPTIMIZER_OFFLOAD:-True}"
+# 序列打包：跳过 padding token 的计算。实测真实生成 mean=1405/p90=2711/max=6717，
+# 而当前 padding 到 8192 -> 83% 显存浪费在空白上。开启后 logits 按真实 token 算，
+# 与 MAX_RESPONSE_LENGTH 解绑。数学等价（padding 本就被 attention_mask 屏蔽）。
+USE_REMOVE_PADDING="${USE_REMOVE_PADDING:-True}"
 PPO_EPOCHS="${PPO_EPOCHS:-1}"
 TOTAL_EPOCHS="${TOTAL_EPOCHS:-100}"
 # H100 适配：用 total_training_steps 精确控制步数（2 epoch 仅 264 step，不足 300）
 TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-300}"
-MAX_ROUNDS="${MAX_ROUNDS:-20}"
-MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-2048}"
-MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-4096}"
-MAX_MODEL_LEN="${MAX_MODEL_LEN:-8192}"
-MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-512}"
+MAX_ROUNDS="${MAX_ROUNDS:-30}"
+MAX_PROMPT_LENGTH="${MAX_PROMPT_LENGTH:-4096}"
+MAX_RESPONSE_LENGTH="${MAX_RESPONSE_LENGTH:-20480}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-34816}"
+MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-1024}"
 # 0.80 was sized for H200 (141GB). On an 80GB H100 that leaves too little for the
 # FSDP actor + Adam states, which persist from step 1 into step 2's cache re-init.
-ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.50}"
-SAVE_FREQ="${SAVE_FREQ:-50}"
+ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.40}"
+SAVE_FREQ="${SAVE_FREQ:-25}"
 
 ENABLE_ERC="${ENABLE_ERC:-0}"
 ERC_MU_BASE="${ERC_MU_BASE:-1.0}"
@@ -201,36 +224,6 @@ PLAN_FORECAST_K_SCHEDULE="${PLAN_FORECAST_K_SCHEDULE:-}"
 # whose env result was invalid / no-effect ("Nothing happens." / "Invalid Action." /
 # "No known action..."; per-env, auto-selected by task_name). Default off.
 PLAN_FORECAST_SKIP_INVALID="${PLAN_FORECAST_SKIP_INVALID:-True}"
-
-# ===== Temporal Ensembling (TE) — 默认全关，开关不动时行为与改动前完全一致 =====
-# 把 plan_forecast 的时间视角预测聚合成 q_t，用 KL(π_θ^0 ‖ q_t) 正则化 GRPO。
-# 设计与验证：/data1/logs/temporal_ensemble_design.md
-# 一键回退：bash /data1/logs/revert_te.sh
-TE_ENABLE="${TE_ENABLE:-False}"            # 总开关；False 时整条路径不执行
-TE_LAMBDA="${TE_LAMBDA:-0.0}"              # λ_TE。**先用 0 做 dry-run 看 te/gain_win**
-TE_ETA="${TE_ETA:-0.5}"                    # η：forecast 混合比例；0 时 q_t 退化为 π^0_θ̄
-TE_KL_TYPE="${TE_KL_TYPE:-low_var_kl}"     # 与现有 ref-KL 同口径(k3)
-# te_mix: token=逐 token 混合(默认)；seq=序列级混合。2026-09-15 dry-run 实测序列级
-# 会退化（qF 权重 3e-4，log q-log π⁰ 恒为 log(1-η)，梯度是常数、不含方向信息），
-# 保留 seq 仅为可复现对照。
-# te_mix: fullvocab=全词表逐 token KL（唯一有不动点且无逃逸路径的形式）
-#         token=只在实际 token 上混合（有逃逸路径，长度失控）
-#         seq  =序列级（退化为常数梯度）
-# 后两者均已实测失败，保留仅为可复现对照。
-# vLLM 端口隔离。未设 VLLM_PORT 时 vllm/utils.py:get_open_port() 走
-# bind("",0) 探测分支：探到空闲端口后到真正 bind 之间有窗口，别的进程可能抢走
-# (TOCTOU)，单训练偶发、双训练并存时高发。设了 VLLM_PORT 才走带
-# `except OSError: port += 1` 的重试分支。两个并行 arm 用不同 base 即可错开。
-# 默认值保持单训练行为不变（只是更健壮），不影响训练数值。
-export VLLM_PORT="${VLLM_PORT:-29700}"
-TE_MIX="${TE_MIX:-fullvocab}"
-# te_center: 扣掉共模（默认 True）。False = 原始 KL 形式，2026-09-15 实测会让
-# response_length 从 931 涨到 3264、成功率归零——因为共模压制(0.20/tok)大于
-# win/fail 信号(0.13/tok)，而模型可以把概率质量挪到非动作 token 上规避。
-TE_CENTER="${TE_CENTER:-True}"
-TE_WARMUP_STEPS="${TE_WARMUP_STEPS:-50}"   # 前 N 步只观测不加梯度（等 forecast 训起来）
-TE_TRAJ_SUBSAMPLE="${TE_TRAJ_SUBSAMPLE:-1.0}"   # <1 则随机抽部分轨迹打分（无偏，降本）
-TE_MICRO_BATCH_SIZE_PER_GPU="${TE_MICRO_BATCH_SIZE_PER_GPU:-1}"
 PLAN_FORECAST_SUCCESS_THRESHOLD="${PLAN_FORECAST_SUCCESS_THRESHOLD:-0.5}"
 PLAN_FORECAST_MAX_LENGTH="${PLAN_FORECAST_MAX_LENGTH:-4096}"
 # plan_forecast target: action (predict realized next-K actions; block2-success,
@@ -291,7 +284,7 @@ WM_MAX_LENGTH="${WM_MAX_LENGTH:-4096}"
 WM_MAX_SAMPLES_PER_TRAJECTORY="${WM_MAX_SAMPLES_PER_TRAJECTORY:-null}"
 WM_MIN_ENV_TOKENS="${WM_MIN_ENV_TOKENS:-1}"
 
-EXP_NAME="${EXP_NAME:-sciworld_grpo_qwen2.5_3b_$(date -u +%Y%m%d_%H%M%S)}"
+EXP_NAME="${EXP_NAME:-appworld_grpo_qwen2.5_14b_$(date -u +%Y%m%d_%H%M%S)}"
 CKPT_DIR="${CKPT_DIR:-${ROOT}/checkpoints/${EXP_NAME}}"
 RUN_DIR="${RUN_DIR:-${ROOT}/runlogs/${EXP_NAME}}"
 # Checkpoint resume. 'auto' (default): auto-resume from the latest global_step_* in
@@ -302,13 +295,13 @@ RUN_DIR="${RUN_DIR:-${ROOT}/runlogs/${EXP_NAME}}"
 # 'disable' to force from-scratch.
 RESUME_MODE="${RESUME_MODE:-auto}"
 ROLLOUT_LOG_DIR="${ROLLOUT_LOG_DIR:-${RUN_DIR}/rollout_logs}"
-TRAIN_FILE="${TRAIN_FILE:-/data1/datasets/AgentGym-RL-Data-ID/train/sciworld_train.json}"
+TRAIN_FILE="${TRAIN_FILE:-/data1/datasets/AgentGym-RL-Data-ID/train/appworld_train.json}"
 LOG_PATH="${LOG_PATH:-}"
 
 mkdir -p "${CKPT_DIR}" "${RUN_DIR}" "${ROLLOUT_LOG_DIR}"
 if [[ -n "${LOG_PATH}" ]]; then
   mkdir -p "$(dirname "${LOG_PATH}")"
-  exec >>"${LOG_PATH}" 2>&1   # 追加：崩溃续训时保留历史日志
+  exec >"${LOG_PATH}" 2>&1
 fi
 
 source "${CONDA_SH}"
@@ -359,6 +352,11 @@ exec env \
     actor_rollout_ref.actor.optim.lr="${POLICY_LR}" \
     actor_rollout_ref.actor.ppo_mini_batch_size="${PPO_MINI_BATCH_SIZE}" \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu="${PPO_MICRO_BATCH_SIZE_PER_GPU}" \
+    actor_rollout_ref.actor.use_dynamic_bsz="${USE_DYNAMIC_BSZ}" \
+    actor_rollout_ref.actor.ppo_max_token_len_per_gpu="${PPO_MAX_TOKEN_LEN_PER_GPU}" \
+    actor_rollout_ref.actor.ulysses_sequence_parallel_size="${ULYSSES_SP}" \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload="${OPTIMIZER_OFFLOAD}" \
+    actor_rollout_ref.model.use_remove_padding="${USE_REMOVE_PADDING}" \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.dtype=bfloat16 \
     actor_rollout_ref.rollout.enforce_eager=True \
@@ -369,6 +367,7 @@ exec env \
     actor_rollout_ref.rollout.n="${ROLLOUT_N}" \
     actor_rollout_ref.rollout.max_model_len="${MAX_MODEL_LEN}" \
     actor_rollout_ref.rollout.max_tokens="${MAX_TOKENS_PER_TURN}" \
+    actor_rollout_ref.rollout.temperature="${ROLLOUT_TEMPERATURE}" \
     actor_rollout_ref.rollout.tensor_model_parallel_size=1 \
     actor_rollout_ref.rollout.rollout_log_dir="${ROLLOUT_LOG_DIR}" \
     algorithm.kl_ctrl.kl_coef="${KL_COEF}" \
@@ -454,16 +453,6 @@ exec env \
     +actor_rollout_ref.actor.plan_forecast_group_dedup="${PLAN_FORECAST_GROUP_DEDUP}" \
     +actor_rollout_ref.actor.plan_forecast_k_schedule="'${PLAN_FORECAST_K_SCHEDULE}'" \
     +actor_rollout_ref.actor.plan_forecast_skip_invalid="${PLAN_FORECAST_SKIP_INVALID}" \
-    +actor_rollout_ref.actor.te_enable="${TE_ENABLE}" \
-    +actor_rollout_ref.actor.te_lambda="${TE_LAMBDA}" \
-    +actor_rollout_ref.actor.te_eta="${TE_ETA}" \
-    +actor_rollout_ref.actor.te_kl_type="${TE_KL_TYPE}" \
-    +actor_rollout_ref.actor.te_mix="${TE_MIX}" \
-    +actor_rollout_ref.actor.te_center="${TE_CENTER}" \
-    +actor_rollout_ref.actor.te_warmup_steps="${TE_WARMUP_STEPS}" \
-    +actor_rollout_ref.actor.te_traj_subsample="${TE_TRAJ_SUBSAMPLE}" \
-    +actor_rollout_ref.actor.te_micro_batch_size_per_gpu="${TE_MICRO_BATCH_SIZE_PER_GPU}" \
-    +actor_rollout_ref.rollout.te_enable="${TE_ENABLE}" \
     +actor_rollout_ref.actor.plan_forecast_success_threshold="${PLAN_FORECAST_SUCCESS_THRESHOLD}" \
     +actor_rollout_ref.actor.plan_forecast_max_length="${PLAN_FORECAST_MAX_LENGTH}" \
     +actor_rollout_ref.actor.plan_forecast_target="${PLAN_FORECAST_TARGET}" \
