@@ -49,6 +49,33 @@ DEFAULT_TEMPERATURE = 1.0
 DEFAULT_TOP_P = 1.0
 DEFAULT_TIMEOUT = 2400
 
+
+# ---------------------------------------------------------------------------
+# 2026-09-20: thinking 模型（Qwen3）的多轮 prompt 必须与训练 rollout 逐 token 一致，
+# 统一由 verl/workers/rollout/token_io.py 构造（训练侧 RolloutHandler 用的也是它）。
+# 按文件路径加载，避免 import verl 包带来的副作用。非 thinking 模型（Qwen2.5）不经过这里。
+import importlib.util as _ilu
+_TIO_PATH = Path(__file__).resolve().parent.parent / "AgentGym-RL" / "verl" / "workers" / "rollout" / "token_io.py"
+_spec = _ilu.spec_from_file_location("_token_io", _TIO_PATH)
+token_io = _ilu.module_from_spec(_spec); _spec.loader.exec_module(token_io)
+# ---------------------------------------------------------------------------
+
+
+# Qwen3 等混合推理模型默认先生成 <think>，会耗光每轮预算。与训练 rollout 同一逻辑：
+# 模板认 enable_thinking 就关掉，不认（Qwen2.5 等）返回 {}、行为不变。
+_NOTHINK_CACHE: dict = {}
+def _nothink(tok) -> dict:
+    key = getattr(tok, "name_or_path", None) or id(tok)
+    if key not in _NOTHINK_CACHE:
+        p = [{"role": "user", "content": "x"}]
+        try:
+            a = tok.apply_chat_template(p, add_generation_prompt=True, tokenize=False)
+            b = tok.apply_chat_template(p, add_generation_prompt=True, tokenize=False, enable_thinking=False)
+            _NOTHINK_CACHE[key] = {"enable_thinking": False} if a != b else {}
+        except Exception:
+            _NOTHINK_CACHE[key] = {}
+    return _NOTHINK_CACHE[key]
+
 # ---------------------------------------------------------------------------
 class LocalModel:
     """Wrapper for vLLM model to handle thread-safe inference."""
@@ -103,10 +130,18 @@ class LocalModel:
             print(f"ERROR: Weights still missing in {model_path} after merge attempt.")
             return
 
+    def generate_ids(self, prompt_ids, sampling_params) -> list:
+        """token 进 token 出（thinking 模型路径用）：返回 vLLM 原始生成 token。"""
+        from vllm.inputs import TokensPrompt
+        with self._lock:
+            outputs = self.llm.generate(TokensPrompt(prompt_token_ids=list(prompt_ids)),
+                                        sampling_params, use_tqdm=False)
+        return list(outputs[0].outputs[0].token_ids)
+
     def generate(self, messages: list[dict[str, str]], sampling_params: SamplingParams) -> str:
         prompt = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
-        )
+        , **_nothink(self.tokenizer))
         with self._lock:
             outputs = self.llm.generate([prompt], sampling_params, use_tqdm=False)
         return outputs[0].outputs[0].text
@@ -164,6 +199,22 @@ def run_trajectory(
         "terminated_by": terminated_by,
         "conversations": conversation,
     }
+
+
+def run_trajectory_tokenio(env_client, model, sampling_params, item_idx: int, max_rounds: int) -> dict:
+    """thinking 模型（Qwen3）用：prompt 逐 token 复现训练 rollout，见 token_io.run_episode。"""
+    env_client.reset(item_idx)
+    first = env_client.observe()
+    cs = env_client.conversation_start
+    def step_fn(content):
+        st = env_client.step(content)
+        return st.state, st.reward, st.done
+    ep = token_io.run_episode(model.tokenizer, lambda ids: model.generate_ids(ids, sampling_params),
+                              step_fn, cs[0]["value"], cs[1]["value"], first, max_rounds)
+    return {"item_id": f"webshop_{item_idx}", "reward": ep["reward"],
+            "success": 1 if ep["reward"] == 1.0 else 0, "rounds": ep["rounds"],
+            "terminated_by": ep["terminated_by"], "conversations": ep["conversation"],
+            "prompt_mode": "token_io"}
 
 # ---------------------------------------------------------------------------
 class EnvPool:
@@ -235,13 +286,18 @@ def main():
     parser.add_argument("--temp", type=float, default=DEFAULT_TEMPERATURE)
     parser.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)
     parser.add_argument("--limit", type=int, default=0)
+    parser.add_argument("--test-file", type=Path, default=DEFAULT_TEST_FILE,
+                        help="测试集 id 文件。原先脚本写死读 DEFAULT_TEST_FILE、没有此参数")
     parser.add_argument("--overwrite", action="store_true")
     args = parser.parse_args()
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     env_addrs = [s.strip() for s in args.env_addrs.split(",") if s.strip()]
     
-    test_ids = load_test_ids(DEFAULT_TEST_FILE)
+    test_ids = load_test_ids(args.test_file)
+    # 找不到文件时 load_test_ids 返回 []，评测会"成功"跑完 0 道题 —— 必须显式失败
+    if not test_ids:
+        print(f"ERROR: 测试集为空或不存在: {args.test_file}"); sys.exit(1)
     if args.limit > 0:
         test_ids = test_ids[:args.limit]
 
@@ -266,7 +322,10 @@ def main():
     def worker(idx):
         try:
             env = pool.get()
-            payload = run_trajectory(env, model, sampling_params, idx, args.max_rounds)
+            if token_io.uses_token_io(model.tokenizer):   # Qwen3 等 thinking 模型
+                payload = run_trajectory_tokenio(env, model, sampling_params, idx, args.max_rounds)
+            else:                                          # Qwen2.5 等：原路径不变
+                payload = run_trajectory(env, model, sampling_params, idx, args.max_rounds)
             out_path = args.output_dir / f"webshop_{idx}.json"
             with out_path.open("w") as f:
                 json.dump(payload, f, indent=2)

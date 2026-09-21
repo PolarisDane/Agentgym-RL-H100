@@ -353,6 +353,10 @@ __MODEL_DTENSOR_WEIGHT_LOADER_REGISTRY__ = {
     "GPTBigCodeForCausalLM": gptbigcode_dtensor_load_weights,
     "Starcoder2ForCausalLM": starcoder2_dtensor_load_weights,
     "Qwen2ForCausalLM": qwen2_dtensor_weight_loader,
+    # 2026-09-19: Qwen3 复用 qwen2 的 loader。Qwen3 多出的 self_attn.q_norm/k_norm.weight
+    # 不含 q_proj/k_proj 子串，不会误入 stacked 映射，而是落进默认分支按原名加载；
+    # Qwen3 的 attention 无 bias，actor 侧不会产出 .bias，也不触发 bias 分支。
+    "Qwen3ForCausalLM": qwen2_dtensor_weight_loader,
     "DeepseekV2ForCausalLM": deepseekv2_dtensor_weight_loader,
     "Qwen2VLForConditionalGeneration": qwen2vl_dtensor_weight_loader,
 }

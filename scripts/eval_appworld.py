@@ -29,6 +29,26 @@ DEFAULT_TOP_P = 1.0
 DEFAULT_MAX_MODEL_LEN = 32768   # Qwen2.5-14B 的 max_position_embeddings 上限；训练时 verl 强制覆盖到 34816，评测不越界
 
 
+
+# ---------------------------------------------------------------------------
+# Qwen3 等混合推理模型默认先生成 <think>...</think>，会把每轮的生成预算耗光。
+# 与训练 rollout（verl/workers/rollout/schemas.py::_thinking_kwargs）同一逻辑：
+# 探测模板是否认 enable_thinking —— 认就关掉，不认（Qwen2.5 等）返回 {}、行为不变。
+_NOTHINK_CACHE: dict = {}
+def _nothink(tok) -> dict:
+    key = getattr(tok, "name_or_path", None) or id(tok)
+    if key not in _NOTHINK_CACHE:
+        p = [{"role": "user", "content": "x"}]
+        try:
+            a = tok.apply_chat_template(p, add_generation_prompt=True, tokenize=False)
+            b = tok.apply_chat_template(p, add_generation_prompt=True, tokenize=False,
+                                        enable_thinking=False)
+            _NOTHINK_CACHE[key] = {"enable_thinking": False} if a != b else {}
+        except Exception:
+            _NOTHINK_CACHE[key] = {}
+    return _NOTHINK_CACHE[key]
+# ---------------------------------------------------------------------------
+
 def build_argparser():
     p = argparse.ArgumentParser()
     p.add_argument("--model-path", required=True)
@@ -46,6 +66,11 @@ def build_argparser():
     p.add_argument("--temp", type=float, default=DEFAULT_TEMPERATURE)
     p.add_argument("--top-p", type=float, default=DEFAULT_TOP_P)
     p.add_argument("--limit", type=int, default=0, help="只跑前 N 题，0=全部")
+    p.add_argument("--prompt-variant", default="react", choices=["react", "base"],
+                   help="react=仓库当前的官方 ReAct few-shot system prompt; "
+                        "base=ReAct 之前的极简 zero-shot prompt "
+                        "(scripts/appworld_prompt_base.txt)。只影响评测，不碰 appworld.py，"
+                        "训练路径零影响。")
     p.add_argument("--overwrite", action="store_true")
     return p
 
@@ -59,6 +84,11 @@ def main():
         return 0
 
     from agentenv.envs.appworld import AppWorldEnvClient, _APPWORLD_SYSTEM
+    if args.prompt_variant == "base":
+        _APPWORLD_SYSTEM = (Path(__file__).parent / "appworld_prompt_base.txt").read_text(
+            encoding="utf-8")
+    print(f"[eval] prompt_variant={args.prompt_variant} "
+          f"({len(_APPWORLD_SYSTEM)} 字符)", flush=True)
     from transformers import AutoTokenizer
     from vllm import LLM, SamplingParams
 
@@ -96,6 +126,7 @@ def main():
     summary = {
         "model_path": str(args.model_path),
         "split": args.split,
+        "prompt_variant": args.prompt_variant,
         "num_tasks": len(results),
         "num_success": succ,
         "success_rate": succ / len(results) if results else 0.0,
@@ -107,9 +138,9 @@ def main():
         "env_errors": sum(1 for r in results if r.get("error")),
         "elapsed_min": (time.time() - t0) / 60,
     }
-    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False))
+    summary_path.write_text(json.dumps(summary, indent=2, ensure_ascii=False), encoding="utf-8")
     (args.output_dir / "trajectories.json").write_text(
-        json.dumps(results, indent=2, ensure_ascii=False))
+        json.dumps(results, indent=2, ensure_ascii=False), encoding="utf-8")
     print("[eval] " + json.dumps(summary, ensure_ascii=False), flush=True)
     return 0
 
@@ -130,15 +161,25 @@ def _split_size(split):
 def _run_batch(ids, addrs, llm, tok, sp, args, ClientCls, system_prompt):
     """一批轨迹按轮同步推进，复刻 verl 的 rollout 循环。"""
     n = len(ids)
-    clients, convs, done, reward, err = [], [], [], [], []
-    for k, tid in enumerate(ids):
+    err = [None] * n          # 按任务下标定位；原先用 append 会把错误记到错的任务上
+
+    # create + reset 并行化。原先是串行 for 循环：实测 209 条轨迹要 ~17 分钟，
+    # 这段时间 GPU 完全空转，而且每批都要付一次。每个 k 打到互不相同的 env server
+    # (评测里 concurrency == len(addrs))，彼此独立，可以安全并发；ex.map 保序。
+    def _make(k):
         c = ClientCls(env_server_base=addrs[k % len(addrs)], data_len=1, timeout=600)
-        clients.append(c)
         try:
-            instr = c.reset(tid)
+            return c, c.reset(ids[k]), None
         except Exception as e:
-            instr = ""
-            err.append(str(e)[:200])
+            return c, "", str(e)[:200]
+
+    with ThreadPoolExecutor(max_workers=min(64, n)) as ex:
+        made = list(ex.map(_make, range(n)))
+
+    clients, convs, done, reward = [], [], [], []
+    for k, (c, instr, e) in enumerate(made):
+        clients.append(c)
+        err[k] = e
         convs.append([
             {"role": "user", "content": system_prompt},
             {"role": "assistant", "content": "Ok."},
@@ -146,15 +187,14 @@ def _run_batch(ids, addrs, llm, tok, sp, args, ClientCls, system_prompt):
         ])
         done.append(False)
         reward.append(0.0)
-    err += [None] * (n - len(err))
-
     rounds_used = [0] * n
     for _ in range(args.max_rounds):
         active = [i for i in range(n) if not done[i]]
         if not active:
             break
         prompts = [tok.apply_chat_template(convs[i], tokenize=False,
-                                           add_generation_prompt=True) for i in active]
+                                           add_generation_prompt=True, **_nothink(tok))
+                   for i in active]
         outs = llm.generate(prompts, sp, use_tqdm=False)
         texts = [o.outputs[0].text for o in outs]
 

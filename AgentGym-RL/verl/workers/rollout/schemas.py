@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 import re
-from typing import List, Literal
+from typing import Optional, List, Literal
 from transformers import PreTrainedTokenizer
 import torch
 
@@ -239,6 +239,12 @@ class RolloutHandler:
         }
 
     def get_generation_prompt(self, tokenizer: PreTrainedTokenizer) -> List[int]:
+        # 2026-09-20: thinking 模型（Qwen3）走 token-in/token-out —— vLLM 直接吃训练序列，
+        # 保证生成上下文 G 与训练上下文 T 逐 token 相同。原因与实测见 token_io.py 顶部。
+        # 非 thinking 模型（Qwen2.5）走下面的原路径，逐字节不变。
+        from verl.workers.rollout import token_io
+        if token_io.uses_token_io(tokenizer):
+            return token_io.generation_prompt(tokenizer, self.input_ids)
         conversations = [
             msg.to_dict() for msg in self.messages
         ]
@@ -251,6 +257,7 @@ class RolloutHandler:
         tokenizer: PreTrainedTokenizer,
         content: str,
         format: Literal["qwen"] = "qwen",
+        response_ids: Optional[List[int]] = None,
     ) -> None:
         msg = Message(role='assistant', content=content)
         self.messages.append(msg)
@@ -259,7 +266,14 @@ class RolloutHandler:
         prefix_token_ids = tokenizer.encode(prefix_msg, add_special_tokens=False)
         suffix_msg = self.format_config[format]["assistat_suffix_msg"]
         suffix_token_ids = tokenizer.encode(suffix_msg, add_special_tokens=False)
-        response = tokenizer.encode(content, add_special_tokens=False)
+        # 2026-09-20: thinking 模型且传入了 vLLM 原始 token 时，直接用原始 token
+        # （去掉末尾结束符/padding），不再 decode→encode —— 后者有 1.2% 的回复切分会变。
+        # 非 thinking 模型（Qwen2.5）或未传 response_ids 时走原路径，逐字节不变。
+        from verl.workers.rollout import token_io
+        if response_ids is not None and token_io.uses_token_io(tokenizer):
+            response = token_io.response_body(tokenizer, response_ids)
+        else:
+            response = tokenizer.encode(content, add_special_tokens=False)
         self._assistant_turn += 1
         _t = self._assistant_turn
         # TE 口径：turn_ids 只标**裸动作**的 token，不含 Thought 推理段。

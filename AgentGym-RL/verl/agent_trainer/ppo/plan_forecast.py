@@ -461,10 +461,11 @@ def encode_sft_sample(tokenizer, prefix, target_msgs, max_length: int = 4096,
     None if templating fails or the target is shorter than ``min_target_tokens``."""
     import torch
     try:
+        from verl.workers.rollout.schemas import _thinking_kwargs as _tk  # Qwen3: 关 thinking；旧模型返回 {}
         prefix_text = tokenizer.apply_chat_template(
-            prefix, tokenize=False, add_generation_prompt=True)
+            prefix, tokenize=False, add_generation_prompt=True, **_tk(tokenizer))
         full_text = tokenizer.apply_chat_template(
-            prefix + target_msgs, tokenize=False, add_generation_prompt=False)
+            prefix + target_msgs, tokenize=False, add_generation_prompt=False, **_tk(tokenizer))
     except Exception:  # pragma: no cover - tokenizer template missing
         return None
 
@@ -579,6 +580,7 @@ def build_plan_forecast_batch(
     group_high: float = 1.0,
     group_norm: bool = False,
     group_dedup: bool = True,
+    group_norm_wins_only: bool = True,
 ):
     """Padded forecast-SFT batch over trajectories, with win/all gating.
 
@@ -641,10 +643,16 @@ def build_plan_forecast_batch(
         succ = (r is not None and float(r) > success_threshold)
         # keep decision (gating and norm both distill successes only; gating also
         # filters by group success-rate). group_norm then reweights the kept ones.
+        # 2026-09-18: gate 与 group_norm 解耦。原先 `elif group_norm: if not succ`
+        # 会让 group_norm=True 直接吞掉 gate 参数 —— 想跑 gate='all'+group_norm=True
+        # 的实验时，代码走这个分支、gate 根本不被读取，实验静默失效。
+        # docstring 一直声称两者 orthogonal，但代码对 gate 的交互并不是。
+        # group_norm_wins_only=True 保持旧行为（五个历史 run 逐字不变）；
+        # False 时 group_norm 只管权重归一化，保留哪些轨迹完全由 gate 决定。
         if group_gate != "off":
             if not succ or not _group_ok(i):
                 continue
-        elif group_norm:
+        elif group_norm and group_norm_wins_only:
             if not succ:
                 continue
         elif gate == "wins":
@@ -731,6 +739,7 @@ def build_plan_forecast_batch(
             "plan_forecast/skip_invalid": 1.0 if skip_invalid else 0.0,
             "plan_forecast/group_gate": {"off": 0.0, "low": 1.0, "low_high": 2.0}.get(group_gate, 0.0),
             "plan_forecast/group_norm": 1.0 if group_norm else 0.0,
+            "plan_forecast/group_norm_wins_only": 1.0 if group_norm_wins_only else 0.0,
             "plan_forecast/k": float(k_mean)}
     if group_gate != "off" and g_rate:
         _kept = sum(1 for gid, rt in g_rate.items()

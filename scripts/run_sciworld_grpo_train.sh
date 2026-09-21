@@ -191,6 +191,10 @@ PLAN_FORECAST_GROUP_NORM="${PLAN_FORECAST_GROUP_NORM:-True}"
 # DISTINCT successful action-sequences instead of per-trajectory -> duplicate rollouts
 # don't inflate weight (within-group action repetition is heavy mid/late training).
 PLAN_FORECAST_GROUP_DEDUP="${PLAN_FORECAST_GROUP_DEDUP:-False}"
+# group_norm 是否隐含"只蒸馏成功轨迹"。True=历史行为（五个已完成 run 都是这个）。
+# False = group_norm 只做权重归一化，保留哪些轨迹完全由 PLAN_FORECAST_GATE 决定，
+# 用于跑 gate=all + group_norm=True 的实验（否则 gate 会被 group_norm 静默吞掉）。
+PLAN_FORECAST_GROUP_NORM_WINS_ONLY="${PLAN_FORECAST_GROUP_NORM_WINS_ONLY:-True}"
 # Horizon-growth schedule (curriculum): grow the forecast target length over
 # training. Format "startStep:kMin:kMax,..." (start-step semantics, last stage
 # persists); each per-step sample draws k uniformly in the active [kMin,kMax] and
@@ -452,6 +456,7 @@ exec env \
     +actor_rollout_ref.actor.plan_forecast_group_high_thresh="${PLAN_FORECAST_GROUP_HIGH_THRESH}" \
     +actor_rollout_ref.actor.plan_forecast_group_norm="${PLAN_FORECAST_GROUP_NORM}" \
     +actor_rollout_ref.actor.plan_forecast_group_dedup="${PLAN_FORECAST_GROUP_DEDUP}" \
+    +actor_rollout_ref.actor.plan_forecast_group_norm_wins_only="${PLAN_FORECAST_GROUP_NORM_WINS_ONLY}" \
     +actor_rollout_ref.actor.plan_forecast_k_schedule="'${PLAN_FORECAST_K_SCHEDULE}'" \
     +actor_rollout_ref.actor.plan_forecast_skip_invalid="${PLAN_FORECAST_SKIP_INVALID}" \
     +actor_rollout_ref.actor.te_enable="${TE_ENABLE}" \

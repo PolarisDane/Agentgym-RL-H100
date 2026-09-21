@@ -634,10 +634,12 @@ class ActorRolloutRefWorker(Worker):
                 if k >= len(spans):
                     break
                 try:
-                    ctx_ids = self.tokenizer.apply_chat_template(ctx_msgs, add_generation_prompt=True, tokenize=True)
+                    from verl.workers.rollout.schemas import _thinking_kwargs as _tk  # Qwen3: 关 thinking；旧模型返回 {}
+                    ctx_ids = self.tokenizer.apply_chat_template(ctx_msgs, add_generation_prompt=True, tokenize=True,
+                                                                 **_tk(self.tokenizer))
                     full_ids = self.tokenizer.apply_chat_template(
                         ctx_msgs + [{"role": "assistant", "content": action_text}],
-                        add_generation_prompt=False, tokenize=True)
+                        add_generation_prompt=False, tokenize=True, **_tk(self.tokenizer))
                 except Exception:
                     continue
                 if len(full_ids) <= len(ctx_ids) or len(full_ids) > 2048:
@@ -713,8 +715,10 @@ class ActorRolloutRefWorker(Worker):
             try:
                 conv = list(messages[i]); goal = extract_goal(conv); steps = trajectory_steps(conv)
                 for kind, build in (("P", build_progress_messages), ("E", build_explore_messages)):
+                    from verl.workers.rollout.schemas import _thinking_kwargs as _tk
                     ids = self.tokenizer.apply_chat_template(build(env, goal, steps),
-                                                             add_generation_prompt=True, tokenize=True)
+                                                             add_generation_prompt=True, tokenize=True,
+                                                             **_tk(self.tokenizer))
                     prompts.append(ids); meta.append((i, kind, len(steps)))
             except Exception as e:
                 print(f'[compute_pe_labels] prompt build failed for traj {i}: {e}')

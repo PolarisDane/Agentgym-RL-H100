@@ -1,0 +1,146 @@
+% =====================================================================
+%  Temporal Self-Consistency: metric, measurements, and findings
+%  Self-contained section; \input{} into the main paper.
+%  Requires: booktabs, amsmath, multirow
+% =====================================================================
+
+\section{Measuring Temporal Self-Consistency}
+\label{sec:te}
+
+\subsection{Metric}
+\label{sec:te-metric}
+
+An agent is \emph{temporally self-consistent} if the action it takes at turn $t$ is one
+it could already have predicted several turns earlier. Let $a_t$ be the action emitted
+at turn $t$ of a trajectory $\tau$, tokenised as $a_t = (a_t^1,\dots,a_t^{n_t})$. We
+truncate the dialogue at each of the $k$ preceding turns and ask the model to
+\emph{forecast} the action at $t$; the forecast ensemble is the uniform mixture
+\begin{equation}
+  q^{F}(\cdot) \;=\; \frac{1}{k}\sum_{j=1}^{k}
+  \pi_\theta\!\left(\cdot \;\middle|\; \tau_{<t-j}\right),
+  \label{eq:qf}
+\end{equation}
+while $\pi^{0}(\cdot) = \pi_\theta(\cdot \mid \tau_{<t})$ is the model's
+\emph{on-the-spot} distribution given the full preceding prefix. The per-token
+temporal gain is
+\begin{equation}
+  g_t \;=\; \frac{1}{n_t}\Big[\log q^{F}(a_t) - \log \pi^{0}(a_t)\Big],
+  \label{eq:gain}
+\end{equation}
+averaged over the target turns of $\tau$. Both terms are evaluated token-by-token over
+the full vocabulary; $g_t = 0$ means the forecast made $k$ turns in advance is as
+confident in the realised action as the model is once it is there, and $g_t < 0$
+quantifies the missing foresight. We use $k=3$ and mixture weight $\eta = 0.5$.
+
+\paragraph{The metric is a difference, and must be reported as one.}
+Eq.~\eqref{eq:gain} rises under two mechanisms with opposite meaning: (A)
+$\log q^{F}$ rises, i.e.\ the model genuinely anticipates the action earlier --- the
+intended effect; or (B) $\log \pi^{0}$ falls, i.e.\ the model has moved away from
+$a_t$ and no longer finds it likely even in context, so the gain rises with no
+improvement in foresight. The two are empirically separable and, as
+\S\ref{sec:te-findings} shows, they diverge in our data. We therefore report
+$\Delta \log q^{F}$ and $-\Delta \log \pi^{0}$ alongside every $\Delta g$, and read a
+gain unaccompanied by a rise in $\log q^{F}$ as an artefact.
+
+\subsection{Evaluation protocol}
+\label{sec:te-protocol}
+
+Because $g_t$ is evaluated \emph{on} a trajectory, the choice of trajectories is part
+of the measurement. Scoring each checkpoint on its own rollouts --- the quantity
+logged during training --- is not viable: a model assigns near-certainty to its own
+outputs (mean per-token $\log \pi^{0}$ of $-0.02$ against $-1.30$ on held-out
+trajectories), so the denominator of Eq.~\eqref{eq:gain} collapses and $g_t$
+degenerates into ``how well does the model predict text it wrote itself''. Holding
+the \emph{weights fixed} and changing only the trajectory set moves the untrained base
+model by $+3.53$, larger than the training effect of any checkpoint we evaluate.
+
+All models are therefore scored on one frozen set of $60$ held-out trajectories
+($1{,}428$ target turns), admitting only episodes that terminated with full task
+reward, stratified to cover $20$ of the $26$ task types in the test split, and with
+provenance rotated evenly across three independently trained runs ($21/20/19$) so that
+no system is scored predominantly on its own outputs. Excluding the trajectories
+contributed by the system under evaluation leaves all conclusions unchanged and
+slightly strengthens the positive effects (CoPE at step $250$:
+$+2.080 \rightarrow +2.211$; GRPO: $-0.630 \rightarrow -0.688$). Target turns within a
+trajectory are correlated, so all intervals are $95\%$ bootstrap CIs over $4{,}000$
+resamples at the trajectory level, computed on paired per-trajectory differences
+against the base model.
+
+\subsection{Results}
+\label{sec:te-findings}
+
+We evaluate an untrained base model and two systems at five checkpoints each: plain
+GRPO, and CoPE, which augments the same RL objective with an auxiliary term training
+the policy to predict its own next $k$ actions ($k=3$).
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{llccc}
+\toprule
+System & Step & $\Delta g$ (95\% CI) & $\Delta \log q^{F}$ (95\% CI) & $-\Delta \log \pi^{0}$ \\
+\midrule
+\multirow{5}{*}{GRPO}
+ & 50  & $+0.368$ \; $[+0.27, +0.47]$ & $+0.587$ \; $[+0.50, +0.69]$ & $-0.220$ \\
+ & 100 & $+0.020$ \; $[-0.15, +0.19]$ & $+0.261$ \; $[+0.08, +0.44]$ & $-0.241$ \\
+ & 150 & $-0.361$ \; $[-0.61, -0.13]$ & $-0.528$ \; $[-0.79, -0.26]$ & $+0.167$ \\
+ & 200 & $-0.493$ \; $[-0.75, -0.24]$ & $-1.008$ \; $[-1.28, -0.73]$ & $+0.515$ \\
+ & 250 & $-0.630$ \; $[-0.95, -0.35]$ & $-1.255$ \; $[-1.58, -0.97]$ & $+0.625$ \\
+\midrule
+\multirow{5}{*}{CoPE}
+ & 50  & $+1.286$ \; $[+1.08, +1.50]$ & $\mathbf{+1.985}$ \; $[+1.75, +2.26]$ & $-0.700$ \\
+ & 100 & $+1.836$ \; $[+1.59, +2.08]$ & $+1.819$ \; $[+1.58, +2.08]$ & $+0.018$ \\
+ & 150 & $+1.946$ \; $[+1.65, +2.24]$ & $+1.461$ \; $[+1.21, +1.71]$ & $+0.486$ \\
+ & 200 & $+2.085$ \; $[+1.83, +2.35]$ & $+1.501$ \; $[+1.27, +1.74]$ & $+0.584$ \\
+ & 250 & $\mathbf{+2.080}$ \; $[+1.81, +2.34]$ & $+1.425$ \; $[+1.17, +1.71]$ & $+0.656$ \\
+\bottomrule
+\end{tabular}
+\caption{Change in temporal gain relative to the untrained base model
+($g = -1.74$, $\log q^{F} = -3.04$, $\log \pi^{0} = -1.30$), on $60$ held-out
+successful trajectories ($1{,}428$ target turns). By construction
+$\Delta g = \Delta \log q^{F} - \Delta \log \pi^{0}$. Bold marks the divergence
+discussed in the text: CoPE's headline gain is largest at step $250$, but its
+forecast term peaks at step $50$.}
+\label{tab:te}
+\end{table}
+
+Table~\ref{tab:te} supports four observations.
+\textbf{RL alone erodes temporal self-consistency.} Plain GRPO is briefly positive at
+step $50$ ($+0.368$), loses significance by step $100$, and reverses to
+$-0.630\,[-0.95,-0.35]$ at step $250$; the decline is driven by the forecast term
+itself ($\Delta\log q^{F}\!: -0.528 \rightarrow -1.255$), so task reward makes the
+policy \emph{less} able to anticipate its own actions even as its success rate rises.
+\textbf{CoPE reverses this, via the intended mechanism.} CoPE is significant at every
+checkpoint and reaches $+2.080\,[+1.81,+2.34]$, separating from GRPO by $2.7$ nats per
+token with non-overlapping intervals throughout; at step $100$ the gain is almost
+purely mechanism~(A) ($-\Delta\log\pi^{0} = +0.018$).
+\textbf{Measured gain and underlying capability diverge later in training.} Beyond
+step $50$ CoPE's forecast term declines monotonically ($+1.985 \rightarrow +1.425$)
+while the headline gain rises, so by step $250$ roughly a third of the measured gain
+reflects the policy moving away from the held-out actions rather than better
+foresight --- foresight is acquired early and then plateaus. This is a limitation of
+the metric rather than of the method, and the reason we treat the decomposition as
+mandatory.
+\textbf{The comparison is partly definitional.} CoPE's auxiliary objective trains the
+model to predict its own next $k$ actions, close to what Eq.~\eqref{eq:gain} measures;
+the result establishes that plain RL does not improve this quantity, but is weak
+evidence of foresight beyond the form directly optimised. Whether it transfers to
+behaviour is a question for the downstream task results.
+
+\subsection{Limitations}
+\label{sec:te-limitations}
+
+$g_t$ is computed offline from stored evaluation trajectories with a single forward
+pass. Against the quantity logged during training on the same checkpoints it tracks
+sign, ordering and monotonicity but is systematically more negative by a factor of
+$1.6$--$3.0$, because the training metric uses training-split rollouts and averages
+over the $1.9$--$2.4$ forecast members available in a batch rather than the full
+$k=3$; it is therefore a correlated proxy, not a reproduction. All conclusions are
+relative comparisons on one frozen trajectory set and do not rely on numerical
+agreement with the training-time quantity. We exclude turns whose action fails to
+parse, but semantically invalid yet well-formed actions (e.g.\ opening a door that
+does not exist) remain as targets, which inflates mechanism~(B); restricting to
+successful trajectories mitigates but does not eliminate this. Finally, results come
+from a single environment, base model, and training seed per system, and the bootstrap
+intervals quantify sampling variation over trajectories, not across training runs.

@@ -1,0 +1,217 @@
+% =====================================================================
+%  Temporal Self-Consistency (TE): metric, measurements, and findings
+%  Self-contained section; \input{} into the main paper.
+%  Requires: booktabs, amsmath, amssymb, graphicx (optional)
+% =====================================================================
+
+\section{Measuring Temporal Self-Consistency}
+\label{sec:te}
+
+\subsection{Metric}
+\label{sec:te-metric}
+
+An agent is \emph{temporally self-consistent} if the action it eventually takes at
+turn $t$ is one it could already have predicted several turns earlier. We make this
+operational as follows. Let $\tau = (o_1, a_1, \dots, o_T, a_T)$ be a trajectory, and
+let $a_t$ denote the action emitted at turn $t$, tokenised as
+$a_t = (a_t^1, \dots, a_t^{n_t})$.
+
+For each \emph{target} turn $t$ we truncate the dialogue at each of the $k$ preceding
+turns and ask the model to \emph{forecast} the action at turn $t$. Writing
+$\pi_\theta(\cdot \mid \tau_{<s})$ for the model's distribution given the prefix up to
+turn $s$, the \emph{forecast ensemble} is the uniform mixture over the $k$ members
+\begin{equation}
+  q^{F}(\cdot) \;=\; \frac{1}{k}\sum_{j=1}^{k} \pi_\theta\!\left(\cdot \;\middle|\; \tau_{<t-j}\right),
+  \label{eq:qf}
+\end{equation}
+while $\pi^{0}(\cdot) = \pi_\theta(\cdot \mid \tau_{<t})$ is the model's
+\emph{on-the-spot} distribution, conditioned on the full prefix that actually preceded
+$a_t$. The per-token temporal gain at turn $t$ is
+\begin{equation}
+  g_t \;=\; \frac{1}{n_t}\Big[\log q^{F}(a_t) \;-\; \log \pi^{0}(a_t)\Big],
+  \label{eq:gain}
+\end{equation}
+and the trajectory-level score is the mean of $g_t$ over the target turns of $\tau$.
+Both terms are evaluated token-by-token over the full vocabulary. A value of $g_t = 0$
+means the forecast made $k$ turns in advance assigns the realised action exactly the
+probability the model assigns it once it is actually there; $g_t < 0$ quantifies how
+much foresight is missing. Throughout we use $k = 3$ and mixture weight $\eta = 0.5$.
+
+\paragraph{The metric is a difference, and must be reported as one.}
+Equation~\eqref{eq:gain} is a difference of two log-probabilities, and it increases
+under two mechanisms that carry opposite scientific meaning:
+\begin{enumerate}[leftmargin=2em,itemsep=2pt,topsep=2pt]
+  \item[(A)] $\log q^{F}(a_t)$ \emph{rises} --- the model genuinely anticipates the
+        action earlier. This is the effect the metric is intended to capture.
+  \item[(B)] $\log \pi^{0}(a_t)$ \emph{falls} --- the model has moved away from $a_t$
+        and no longer considers it likely even in context. The gain rises without any
+        improvement in foresight.
+\end{enumerate}
+Mechanism (B) is not hypothetical: it is the dominant term for one of the systems we
+evaluate (\S\ref{sec:te-findings}). We therefore report $\Delta \log q^{F}$ and
+$-\Delta \log \pi^{0}$ alongside every $\Delta g$, and treat a gain that is not
+accompanied by a rise in $\log q^{F}$ as an artefact rather than a result.
+
+\subsection{Evaluation protocol}
+\label{sec:te-protocol}
+
+Because $g_t$ is evaluated \emph{on} a trajectory, the choice of trajectories is part
+of the measurement. We contrast two protocols.
+
+\paragraph{Self-generated trajectories (\textsc{own}) are not a valid protocol.}
+The natural choice --- score each checkpoint on the trajectories it produced --- matches
+the quantity logged during training, but is confounded twice over. First, the target
+set itself changes with the model: stronger checkpoints emit shorter, cleaner rollouts,
+so the turns being scored are not the same turns. Second, and more damaging, a model
+assigns near-certainty to its own outputs. We measure a mean per-token
+$\log \pi^{0}$ of $-0.03$ to $-0.02$ (probability $0.97$--$0.98$) on self-generated
+trajectories, against $-1.30$ on held-out ones. The denominator of
+Eq.~\eqref{eq:gain} collapses, and $g_t \approx \log q^{F}(a_t)$ degenerates into
+``how well does the model predict text it wrote itself''. As a direct demonstration,
+holding the \emph{model weights fixed} and changing only the trajectory set moves the
+untrained base model from $g = -5.30$ to $g = -1.78$, a shift of $+3.53$ --- larger
+than the training effect of most checkpoints we evaluate. We report \textsc{own}
+only as this negative control.
+
+\paragraph{Fixed held-out trajectories.}
+All models are instead scored on one shared, frozen set of trajectories, so that every
+difference is attributable to the weights alone. Constructing this set requires care,
+and we impose three constraints.
+
+\begin{enumerate}[leftmargin=2em,itemsep=2pt,topsep=2pt]
+  \item \textbf{Successful trajectories only.} We admit only episodes that terminated
+        with full task reward. An earlier version of this set, drawn from the base
+        model, contained no successful episodes at all; its trajectories were dominated
+        by action loops and round-limit truncations, precisely the behaviour RL removes
+        first, which inflates mechanism (B).
+  \item \textbf{Stratification by task type.} Trajectories are sampled across task
+        families, covering $20$ of the $26$ types in the benchmark test split. Naive
+        lexicographic file ordering --- the failure mode of our first attempt --- yields
+        a contiguous block of task identifiers spanning only $4$ types.
+  \item \textbf{Balanced provenance.} Successful trajectories necessarily originate
+        from trained checkpoints. Drawing them all from one system would score that
+        system on its own outputs, reintroducing the \textsc{own} confound. We
+        therefore rotate provenance evenly across the three systems compared
+        ($21/20/19$ of $60$).
+\end{enumerate}
+
+The resulting set contains $60$ trajectories and $1{,}428$ target turns, identical for
+all $16$ models. We verify that balanced provenance suffices: recomputing every
+$\Delta g$ after \emph{excluding} the trajectories contributed by the system under
+evaluation leaves all conclusions unchanged, and in fact slightly strengthens the
+positive effects (\S\ref{sec:te-findings}).
+
+\paragraph{Uncertainty.} Target turns within a trajectory are strongly correlated, so
+we take the trajectory as the resampling unit. All intervals are $95\%$ bootstrap
+confidence intervals over $4{,}000$ resamples of the $60$ trajectories, computed on
+paired per-trajectory differences against the base model.
+
+\subsection{Results}
+\label{sec:te-findings}
+
+We evaluate an untrained base model and three systems at five checkpoints each:
+plain GRPO, GRPO with an auxiliary \emph{plan-forecast} objective ($k=3$) that trains
+the model to predict its own next $k$ actions, and that same objective augmented with
+an explicit temporal-ensembling KL penalty (TE-KL, $\lambda = 10^{-3}$).
+Table~\ref{tab:te} reports the change in temporal gain relative to the base model,
+decomposed into the two mechanisms of \S\ref{sec:te-metric}.
+
+\begin{table}[t]
+\centering
+\small
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{llccc}
+\toprule
+System & Step & $\Delta g$ (95\% CI) & $\Delta \log q^{F}$ (95\% CI) & $-\Delta \log \pi^{0}$ \\
+\midrule
+\multirow{5}{*}{GRPO}
+ & 50  & $+0.368$ \; $[+0.27, +0.47]$ & $+0.587$ \; $[+0.50, +0.69]$ & $-0.220$ \\
+ & 100 & $+0.020$ \; $[-0.15, +0.19]$ & $+0.261$ \; $[+0.08, +0.44]$ & $-0.241$ \\
+ & 150 & $-0.361$ \; $[-0.61, -0.13]$ & $-0.528$ \; $[-0.79, -0.26]$ & $+0.167$ \\
+ & 200 & $-0.493$ \; $[-0.75, -0.24]$ & $-1.008$ \; $[-1.28, -0.73]$ & $+0.515$ \\
+ & 250 & $-0.630$ \; $[-0.95, -0.35]$ & $-1.255$ \; $[-1.58, -0.97]$ & $+0.625$ \\
+\midrule
+\multirow{5}{*}{\; + plan-forecast}
+ & 50  & $+1.286$ \; $[+1.08, +1.50]$ & $+1.985$ \; $[+1.75, +2.26]$ & $-0.700$ \\
+ & 100 & $+1.836$ \; $[+1.59, +2.08]$ & $+1.819$ \; $[+1.58, +2.08]$ & $+0.018$ \\
+ & 150 & $+1.946$ \; $[+1.65, +2.24]$ & $+1.461$ \; $[+1.21, +1.71]$ & $+0.486$ \\
+ & 200 & $+2.085$ \; $[+1.83, +2.35]$ & $+1.501$ \; $[+1.27, +1.74]$ & $+0.584$ \\
+ & 250 & $+2.080$ \; $[+1.81, +2.34]$ & $+1.425$ \; $[+1.17, +1.71]$ & $+0.656$ \\
+\midrule
+\multirow{5}{*}{\; + plan-forecast + TE-KL}
+ & 50  & $+1.292$ \; $[+1.09, +1.49]$ & $+1.951$ \; $[+1.75, +2.17]$ & $-0.659$ \\
+ & 100 & $+1.625$ \; $[+1.39, +1.87]$ & $+1.708$ \; $[+1.43, +2.02]$ & $-0.083$ \\
+ & 150 & $+1.782$ \; $[+1.53, +2.06]$ & $+0.764$ \; $[+0.45, +1.10]$ & $+1.018$ \\
+ & 200 & $+1.747$ \; $[+1.48, +2.03]$ & $+1.215$ \; $[+0.92, +1.53]$ & $+0.533$ \\
+ & 250 & $+2.059$ \; $[+1.78, +2.35]$ & $\mathbf{-0.420}$ \; $[-0.71, -0.11]$ & $\mathbf{+2.479}$ \\
+\bottomrule
+\end{tabular}
+\caption{Change in temporal gain relative to the untrained base model
+($g = -1.74$, $\log q^{F} = -3.04$, $\log \pi^{0} = -1.30$), on $60$ held-out
+successful trajectories ($1{,}428$ target turns). By construction
+$\Delta g = \Delta \log q^{F} - \Delta \log \pi^{0}$. Intervals are $95\%$ bootstrap
+CIs over trajectories. Note the final row: TE-KL attains the largest gain of any
+system while its forecast term is \emph{significantly negative}.}
+\label{tab:te}
+\end{table}
+
+\paragraph{Reinforcement learning alone does not produce temporal self-consistency;
+it erodes it.} Plain GRPO shows a small positive effect early
+($+0.368$, CI excludes zero at step $50$), which is gone by step $100$
+($+0.020$, CI spans zero) and \emph{reverses} thereafter, reaching
+$-0.630$ $[-0.95, -0.35]$ at step $250$. The decomposition locates the cause in the
+forecast term itself: $\Delta \log q^{F}$ turns significantly negative from step $150$
+onward ($-0.528 \rightarrow -1.255$). Task reward alone thus makes the policy
+\emph{less} able to anticipate its own later actions, even as its success rate rises.
+Any claim that temporal self-consistency emerges spontaneously under RL is an artefact
+of the \textsc{own} protocol, under which the same checkpoints appear to improve
+monotonically.
+
+\paragraph{An explicit forecasting objective improves the metric, but the result is
+close to tautological.} The plan-forecast systems improve monotonically to
+$+2.08$ $[+1.81, +2.34]$, driven by the forecast term as intended; the step-$100$
+checkpoint is the cleanest case, where $-\Delta\log\pi^{0} = +0.018$ and essentially
+all of the gain is mechanism (A). We stress, however, that this objective trains the
+model to predict its own next $k$ actions, which is close to what
+Eq.~\eqref{eq:gain} measures. The result confirms that the metric responds to the
+intended construct; it is weak evidence that the objective confers a capability
+beyond the one it directly optimises.
+
+\paragraph{The explicit TE-KL penalty adds nothing, and its apparent gain is a
+decomposition artefact.} Adding TE-KL on top of plan-forecast leaves $\Delta g$
+statistically indistinguishable from plan-forecast alone at every checkpoint. The
+final checkpoint is diagnostic: TE-KL at step $250$ records
+$\Delta g = +2.059$, numerically the joint-largest value in the table, yet its
+forecast term is $\Delta \log q^{F} = -0.420$ $[-0.71, -0.11]$ --- significantly
+\emph{worse} than the untrained base model. The entire apparent gain is carried by
+$-\Delta \log \pi^{0} = +2.479$: the penalty has pushed the policy away from the
+actions in the held-out successful trajectories, which the difference in
+Eq.~\eqref{eq:gain} rewards. Reporting $\Delta g$ alone would have recorded this as
+the best system in the study. This is the concrete reason the decomposition is not
+optional.
+
+\subsection{Limitations}
+\label{sec:te-limitations}
+
+\paragraph{The offline estimator is a correlated proxy, not a reproduction.} We
+compute $g_t$ offline from stored evaluation trajectories with a single forward pass,
+rather than re-running rollouts. Against the quantity logged during training on the
+same checkpoints, the offline values track the training curve in sign, ordering and
+monotonicity, but are systematically more negative by a factor of $1.6$--$3.0$
+(e.g.\ $-0.017$ vs.\ $-0.031$ at step $250$; $-0.375$ vs.\ $-0.987$ at step $50$).
+Two differences account for this: the training metric is computed on rollouts from the
+training split whereas ours uses held-out evaluation trajectories, and the training
+metric averages over $1.9$--$2.4$ available forecast members against our full $k=3$.
+All conclusions above are \emph{relative} comparisons among checkpoints on one frozen
+trajectory set and do not rely on numerical agreement with the training-time quantity.
+
+\paragraph{Invalid-action filtering is incomplete.} We exclude turns whose action
+fails to parse, but semantically invalid yet well-formed actions (e.g.\ opening a door
+that does not exist) remain as targets. Such actions are frequent in weak trajectories
+and are among the first behaviours RL suppresses, which inflates mechanism (B).
+Restricting the evaluation set to successful trajectories mitigates but does not
+eliminate this.
+
+\paragraph{Scope.} Results are from a single environment, a single base model, and one
+training seed per system. The bootstrap intervals quantify sampling variation over
+trajectories, not variation across training runs.

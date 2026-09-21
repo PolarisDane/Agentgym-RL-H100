@@ -149,6 +149,12 @@ class RLHFDataset(Dataset):
         ack = self.env_client.conversation_start[1]["value"]
         messages = [{"role": "user", "content": instruction},
                      {"role": "assistant", "content": ack}]
+        # 2026-09-20: thinking 模型（Qwen3）用模型自己的模板渲染初始 prompt —— 下面写死的是
+        # Qwen2.5 的默认 system prompt，Qwen3 模板不加它，会导致生成/训练上下文不一致。
+        # 非 thinking 模型（Qwen2.5）仍用原字符串（已验证与 Qwen2.5 模板渲染结果一字不差）。
+        from verl.workers.rollout import token_io
+        if token_io.uses_token_io(self.tokenizer):
+            return messages, token_io.initial_prompt_text(self.tokenizer, messages)
         prompt_with_chat_template = "<|im_start|>system\nYou are Qwen, created by Alibaba Cloud. You are a helpful assistant.<|im_end|>\n<|im_start|>user\n" + instruction + "<|im_end|>\n<|im_start|>assistant\n" + ack + "<|im_end|>"
         return messages, prompt_with_chat_template
 

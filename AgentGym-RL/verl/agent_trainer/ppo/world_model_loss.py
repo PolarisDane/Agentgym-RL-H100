@@ -106,10 +106,11 @@ def build_world_model_sft_samples(
         target = [{'role': 'assistant', 'content': msg['content']}]
 
         try:
+            from verl.workers.rollout.schemas import _thinking_kwargs as _tk  # Qwen3: 关 thinking；旧模型返回 {}
             prefix_text = tokenizer.apply_chat_template(
-                prefix, tokenize=False, add_generation_prompt=True)
+                prefix, tokenize=False, add_generation_prompt=True, **_tk(tokenizer))
             full_text = tokenizer.apply_chat_template(
-                prefix + target, tokenize=False, add_generation_prompt=False)
+                prefix + target, tokenize=False, add_generation_prompt=False, **_tk(tokenizer))
         except Exception:  # pragma: no cover - tokenizer template missing
             continue
 

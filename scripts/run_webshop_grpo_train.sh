@@ -59,6 +59,9 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-16384}"
 MAX_TOKENS_PER_TURN="${MAX_TOKENS_PER_TURN:-512}"
 ROLLOUT_GPU_MEMORY_UTILIZATION="${ROLLOUT_GPU_MEMORY_UTILIZATION:-0.80}"
 SAVE_FREQ="${SAVE_FREQ:-25}"
+# 2026-09-19: 可选的总步数上限。为空时不传给 trainer，仍按 TOTAL_EPOCHS 结束（旧行为）。
+# 注意 verl 的差一约定：设 N 实际做 N-1 次更新，要训满 200 步请设 201。
+TOTAL_TRAINING_STEPS="${TOTAL_TRAINING_STEPS:-}"
 
 ENABLE_ERC="${ENABLE_ERC:-0}"
 ERC_MU_BASE="${ERC_MU_BASE:-1.0}"
@@ -338,6 +341,7 @@ exec env \
     trainer.default_local_dir="${CKPT_DIR}" \
     trainer.save_freq="${SAVE_FREQ}" \
     trainer.total_epochs="${TOTAL_EPOCHS}" \
+    ${TOTAL_TRAINING_STEPS:+trainer.total_training_steps=${TOTAL_TRAINING_STEPS}} \
     trainer.nnodes=1 \
     trainer.n_gpus_per_node="${NUM_GPUS}" \
     wmc_erc.enable="${ERC_ENABLE_VALUE}" \

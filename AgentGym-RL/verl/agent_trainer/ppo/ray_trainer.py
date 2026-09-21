@@ -1228,6 +1228,8 @@ class RayPPOTrainer(object):
         # group_norm = give each kept group equal total plan-CE weight (stability).
         group_gate = str(actor_cfg.get('plan_forecast_group_gate', 'off')).lower()
         group_norm = bool(actor_cfg.get('plan_forecast_group_norm', False))
+        # False 时 group_norm 只做权重归一化，保留哪些轨迹交给 gate 决定
+        group_norm_wins_only = bool(actor_cfg.get('plan_forecast_group_norm_wins_only', True))
         group_ids = None
         if group_gate != 'off' or group_norm:
             _uid = batch.non_tensor_batch.get('uid', None)
@@ -1255,6 +1257,7 @@ class RayPPOTrainer(object):
             group_low=float(actor_cfg.get('plan_forecast_group_low_thresh', 0.5)),
             group_high=float(actor_cfg.get('plan_forecast_group_high_thresh', 1.0)),
             group_norm=group_norm,
+            group_norm_wins_only=group_norm_wins_only,
             group_dedup=bool(actor_cfg.get('plan_forecast_group_dedup', True)),
         )
         if assembled is None:
@@ -1407,8 +1410,12 @@ class RayPPOTrainer(object):
             pred_per_traj = [[0] * turns_per_traj[i] for i in range(B)]
             if prompts:
                 # tokenize (left-pad) → DataProto → dispatched generation+parse
+                # Qwen3: 这里是**生成**，不关 thinking 的话模型会先输出 <think>...长推理...，
+                # 把生成预算耗光、解析不到预测。旧模型 _tk 返回 {}，行为不变。
+                from verl.workers.rollout.schemas import _thinking_kwargs as _tk
                 ids_list = [self.tokenizer.apply_chat_template(m, add_generation_prompt=True,
-                                                               tokenize=True) for m in prompts]
+                                                               tokenize=True, **_tk(self.tokenizer))
+                            for m in prompts]
                 K = max(len(x) for x in ids_list)
                 pad_id = self.tokenizer.pad_token_id or self.tokenizer.eos_token_id
                 input_ids = torch.tensor([[pad_id] * (K - len(x)) + x for x in ids_list], dtype=torch.long)

@@ -23,3 +23,6 @@ hs_err_pid*.log
 .gpu_bridge/jobs/
 .gpu_bridge/logs/
 .gpu_bridge/kill/
+# secrets (绝不提交)
+/data1/secrets/
+*.key

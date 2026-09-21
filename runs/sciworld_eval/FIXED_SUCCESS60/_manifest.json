@@ -1,0 +1,362 @@
+[
+ {
+  "task_id": 536,
+  "src_family": "te",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step150/sciworld_536.json"
+ },
+ {
+  "task_id": 537,
+  "src_family": "pf",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step100/sciworld_537.json"
+ },
+ {
+  "task_id": 538,
+  "src_family": "te",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step150/sciworld_538.json"
+ },
+ {
+  "task_id": 543,
+  "src_family": "grpo",
+  "src_step": 200,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step200/sciworld_543.json"
+ },
+ {
+  "task_id": 544,
+  "src_family": "te",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step150/sciworld_544.json"
+ },
+ {
+  "task_id": 547,
+  "src_family": "pf",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step100/sciworld_547.json"
+ },
+ {
+  "task_id": 569,
+  "src_family": "pf",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step150/sciworld_569.json"
+ },
+ {
+  "task_id": 584,
+  "src_family": "te",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step150/sciworld_584.json"
+ },
+ {
+  "task_id": 1002,
+  "src_family": "grpo",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step150/sciworld_1002.json"
+ },
+ {
+  "task_id": 1003,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_1003.json"
+ },
+ {
+  "task_id": 1017,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_1017.json"
+ },
+ {
+  "task_id": 1020,
+  "src_family": "grpo",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step100/sciworld_1020.json"
+ },
+ {
+  "task_id": 1816,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_1816.json"
+ },
+ {
+  "task_id": 1821,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_1821.json"
+ },
+ {
+  "task_id": 1822,
+  "src_family": "grpo",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step150/sciworld_1822.json"
+ },
+ {
+  "task_id": 1824,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_1824.json"
+ },
+ {
+  "task_id": 1897,
+  "src_family": "pf",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step100/sciworld_1897.json"
+ },
+ {
+  "task_id": 1912,
+  "src_family": "grpo",
+  "src_step": 200,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step200/sciworld_1912.json"
+ },
+ {
+  "task_id": 1914,
+  "src_family": "pf",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step100/sciworld_1914.json"
+ },
+ {
+  "task_id": 1915,
+  "src_family": "te",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step100/sciworld_1915.json"
+ },
+ {
+  "task_id": 1969,
+  "src_family": "grpo",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step150/sciworld_1969.json"
+ },
+ {
+  "task_id": 1988,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_1988.json"
+ },
+ {
+  "task_id": 2487,
+  "src_family": "grpo",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step150/sciworld_2487.json"
+ },
+ {
+  "task_id": 2488,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_2488.json"
+ },
+ {
+  "task_id": 2496,
+  "src_family": "pf",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step150/sciworld_2496.json"
+ },
+ {
+  "task_id": 2511,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_2511.json"
+ },
+ {
+  "task_id": 2512,
+  "src_family": "grpo",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step100/sciworld_2512.json"
+ },
+ {
+  "task_id": 2546,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_2546.json"
+ },
+ {
+  "task_id": 2548,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_2548.json"
+ },
+ {
+  "task_id": 2563,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_2563.json"
+ },
+ {
+  "task_id": 2569,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_2569.json"
+ },
+ {
+  "task_id": 2619,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_2619.json"
+ },
+ {
+  "task_id": 2621,
+  "src_family": "grpo",
+  "src_step": 200,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step200/sciworld_2621.json"
+ },
+ {
+  "task_id": 2862,
+  "src_family": "grpo",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step100/sciworld_2862.json"
+ },
+ {
+  "task_id": 2864,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_2864.json"
+ },
+ {
+  "task_id": 2887,
+  "src_family": "grpo",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step100/sciworld_2887.json"
+ },
+ {
+  "task_id": 2888,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_2888.json"
+ },
+ {
+  "task_id": 2893,
+  "src_family": "te",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step100/sciworld_2893.json"
+ },
+ {
+  "task_id": 2912,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_2912.json"
+ },
+ {
+  "task_id": 2915,
+  "src_family": "grpo",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step150/sciworld_2915.json"
+ },
+ {
+  "task_id": 3168,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_3168.json"
+ },
+ {
+  "task_id": 3174,
+  "src_family": "grpo",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step150/sciworld_3174.json"
+ },
+ {
+  "task_id": 3191,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_3191.json"
+ },
+ {
+  "task_id": 3195,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_3195.json"
+ },
+ {
+  "task_id": 3464,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_3464.json"
+ },
+ {
+  "task_id": 3465,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_3465.json"
+ },
+ {
+  "task_id": 3471,
+  "src_family": "grpo",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step50/sciworld_3471.json"
+ },
+ {
+  "task_id": 3482,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_3482.json"
+ },
+ {
+  "task_id": 3483,
+  "src_family": "grpo",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step150/sciworld_3483.json"
+ },
+ {
+  "task_id": 3485,
+  "src_family": "te",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step100/sciworld_3485.json"
+ },
+ {
+  "task_id": 3766,
+  "src_family": "grpo",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step150/sciworld_3766.json"
+ },
+ {
+  "task_id": 3782,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_3782.json"
+ },
+ {
+  "task_id": 3789,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_3789.json"
+ },
+ {
+  "task_id": 3861,
+  "src_family": "te",
+  "src_step": 100,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step100/sciworld_3861.json"
+ },
+ {
+  "task_id": 3867,
+  "src_family": "grpo",
+  "src_step": 150,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step150/sciworld_3867.json"
+ },
+ {
+  "task_id": 4283,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_4283.json"
+ },
+ {
+  "task_id": 4284,
+  "src_family": "grpo",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step50/sciworld_4284.json"
+ },
+ {
+  "task_id": 4287,
+  "src_family": "te",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_TEabl_A_20260916_190725/step50/sciworld_4287.json"
+ },
+ {
+  "task_id": 4288,
+  "src_family": "pf",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_planK3_nognorm_v4_20260906_091404/step50/sciworld_4288.json"
+ },
+ {
+  "task_id": 4292,
+  "src_family": "grpo",
+  "src_step": 50,
+  "src": "runs/sciworld_eval/sciworld_grpo_qwen7b_BASELINE_nopf_20260913_102029/step50/sciworld_4292.json"
+ }
+]

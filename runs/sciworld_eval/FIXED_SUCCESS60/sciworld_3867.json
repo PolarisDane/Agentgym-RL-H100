@@ -1,0 +1,128 @@
+{
+  "item_id": "sciworld_3867",
+  "reward": 100.0,
+  "success": 1,
+  "rounds": 13,
+  "terminated_by": "env_done",
+  "conversations": [
+    {
+      "role": "user",
+      "content": "You are an agent for science world. Every round I will give you an observation, you have to respond an action based on the observation to finish the given task. Here are the actions you may take: [{\"action\": \"open/close OBJ\", \"description\": \"open/close a container\"}, {\"action\": \"de/activate OBJ\", \"description\": \"activate/deactivate a device\"}, {\"action\": \"connect OBJ to OBJ\", \"description\": \"connect electrical components\"}, {\"action\": \"disconnect OBJ\", \"description\": \"disconnect electrical components\"}, {\"action\": \"use OBJ [on OBJ]\", \"description\": \"use a device/item\"}, {\"action\": \"look around\", \"description\": \"describe the current room\"}, {\"action\": \"look at OBJ\", \"description\": \"describe an object in detail\"}, {\"action\": \"look in OBJ\", \"description\": \"describe a container's contents\"}, {\"action\": \"read OBJ\", \"description\": \"read a note or book\"}, {\"action\": \"move OBJ to OBJ\", \"description\": \"move an object to a container\"}, {\"action\": \"pick up OBJ\", \"description\": \"move an object to the inventory\"}, {\"action\": \"put down OBJ\", \"description\": \"drop an inventory item\"}, {\"action\": \"pour OBJ into OBJ\", \"description\": \"pour a liquid into a container\"}, {\"action\": \"dunk OBJ into OBJ\", \"description\": \"dunk a container into a liquid\"}, {\"action\": \"mix OBJ\", \"description\": \"chemically mix a container\"}, {\"action\": \"go to LOC\", \"description\": \"move to a new location\"}, {\"action\": \"eat OBJ\", \"description\": \"eat a food\"}, {\"action\": \"flush OBJ\", \"description\": \"flush a toilet\"}, {\"action\": \"focus on OBJ\", \"description\": \"signal intent on a task object\"}, {\"action\": \"wait\", \"description\": \"take no action for 10 iterations\"}, {\"action\": \"wait1\", \"description\": \"take no action for 1 iteration\"}, {\"action\":\"examine OBJ\",\"description\":\"provides a description of the objects present on or in a receptacle.\"}, {\"action\": \"task\", \"description\": \"describe current task\"}, {\"action\": \"inventory\", \"description\": \"list your inventory\"}]\nYour response should use the following format:\nThought:\nyour thoughts.\n\nAction:\nyour next action"
+    },
+    {
+      "role": "assistant",
+      "content": "OK. I'll follow your instructions and try my best to solve the task."
+    },
+    {
+      "role": "user",
+      "content": "Your task is to find a(n) animal. First, focus on the thing. Then, move it to the green box in the kitchen.\nThis room is called the hallway. In it, you see: \n\tthe agent\n\ta substance called air\n\ta drawing\nYou also see:\n\tA door to the art studio (that is closed)\n\tA door to the bedroom (that is closed)\n\tA door to the greenhouse (that is closed)\n\tA door to the kitchen (that is closed)\n\tA door to the living room (that is closed)\n\tA door to the workshop (that is closed)"
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nThe task is to find an animal and move it to the green box in the kitchen. I need to move to the greenhouse to find an animal, as it is likely to have animals in it. \n\nFirst, I need to go to the greenhouse. \n\nAction:\ngo to greenhouse"
+    },
+    {
+      "role": "user",
+      "content": "The door is not open."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nThe door to the greenhouse is closed. I need to open it before I can enter.\n\nAction:\ngo to door to greenhouse\n\nAction:\nopen door to greenhouse"
+    },
+    {
+      "role": "user",
+      "content": "The door is now open."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nThe door to the greenhouse is now open. I can now enter the greenhouse.\n\nAction:\ngo to greenhouse"
+    },
+    {
+      "role": "user",
+      "content": "You move to the greenhouse."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nI have moved to the greenhouse. Now I need to look around for an animal.\n\nAction:\nlook around"
+    },
+    {
+      "role": "user",
+      "content": "This room is called the greenhouse. In it, you see: \n\tthe agent\n\ta substance called air\n\ta bee hive. The bee hive door is closed. \n\ta flower pot 1 (containing a peach tree in the adult stage, soil)\n\ta flower pot 4 (containing a pea plant in the adult stage with a tall height, soil)\n\ta flower pot 5 (containing a banana tree in the adult stage, soil)\n\ta flower pot 7 (containing nothing)\n\ta flower pot 9 (containing nothing)\n\ta jug (containing nothing)\n\ta sink, which is turned off. In the sink is: nothing.\nYou also see:\n\tA door to the hallway (that is open)\n\tA door to the outside (that is closed)"
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nI did not find an animal in the greenhouse. The greenhouse contains a bee hive, but bees are not the target animal. I need to go outside to find an animal.\n\nAction:\ngo to door to outside\n\nAction:\nopen door to outside"
+    },
+    {
+      "role": "user",
+      "content": "The door is now open."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nThe door to the outside is now open. I can now enter the outside.\n\nAction:\ngo to outside"
+    },
+    {
+      "role": "user",
+      "content": "You move to the outside."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nI have moved to the outside. Now I need to look around for an animal.\n\nAction:\nlook around"
+    },
+    {
+      "role": "user",
+      "content": "This outside location is called the outside. Here you see: \n\tthe agent\n\ta substance called air\n\tan axe\n\ta crocodile egg\n\ta fire pit (containing nothing)\n\ta fountain (containing a substance called water)\n\tthe ground\n\ta shovel\n\ta turtle egg\n\ta baby wolf\n\ta substance called wood\nYou also see:\n\tA door to the foundry (that is closed)\n\tA door to the greenhouse (that is open)\n\tA door to the kitchen (that is closed)"
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nI have found an animal in the form of a baby wolf, a crocodile egg, and a turtle egg. A baby wolf is the most immediate animal I can move. \n\nI will focus on the baby wolf as a task object.\n\nAction:\nfocus on baby wolf"
+    },
+    {
+      "role": "user",
+      "content": "You focus on the baby wolf."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nI have focused on the baby wolf. Now I need to move it to the green box in the kitchen.\n\nAction:\nput baby wolf in inventory"
+    },
+    {
+      "role": "user",
+      "content": "You move the wolf to the inventory."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nThe baby wolf is now in my inventory. Now I need to move to the kitchen.\n\nAction:\ngo to kitchen"
+    },
+    {
+      "role": "user",
+      "content": "The door is not open."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nThe door to the kitchen is closed. I need to open it before I can enter.\n\nAction:\ngo to door to kitchen\n\nAction:\nopen door to kitchen"
+    },
+    {
+      "role": "user",
+      "content": "The door is now open."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nThe door to the kitchen is now open. I can now enter the kitchen.\n\nAction:\ngo to kitchen"
+    },
+    {
+      "role": "user",
+      "content": "You move to the kitchen."
+    },
+    {
+      "role": "assistant",
+      "content": "Thought:\nI have moved to the kitchen. Now I need to put the baby wolf in the green box.\n\nAction:\nput baby wolf in green box"
+    },
+    {
+      "role": "user",
+      "content": "You move the wolf to the green box."
+    }
+  ],
+  "task_description": "Your task is to find a(n) animal. First, focus on the thing. Then, move it to the green box in the kitchen.",
+  "success_legacy_ge1": 1,
+  "done": true
+}

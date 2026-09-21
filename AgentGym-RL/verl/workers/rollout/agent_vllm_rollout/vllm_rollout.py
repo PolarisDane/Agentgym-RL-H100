@@ -287,9 +287,16 @@ class vLLMRollout(BaseRollout):
         rounds = 0
         task_rounds = [0] * batch_size
         rollout_bar = tqdm(total = max_rounds, desc="Running rounds", disable=torch.distributed.get_rank() != 0)
+        from verl.workers.rollout import token_io as _tio
+        _token_io = _tio.uses_token_io(self.tokenizer)   # thinking 模型（Qwen3）才为 True
         def agent_step(i, idx):
             content = self.tokenizer.decode(response_ids[i], skip_special_tokens=True)
-            rollout_handler_ls[idx].add_assistant_message(self.tokenizer, content)
+            if _token_io:
+                # 2026-09-20: 训练序列直接用 vLLM 原始 token（见 token_io.py）
+                rollout_handler_ls[idx].add_assistant_message(self.tokenizer, content,
+                                                              response_ids=response_ids[i])
+            else:
+                rollout_handler_ls[idx].add_assistant_message(self.tokenizer, content)
             task_rounds[idx] += 1
             try:
                 step_output = env_clients[idx].step(content)
