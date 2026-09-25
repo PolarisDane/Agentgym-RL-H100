@@ -27,7 +27,11 @@ package_version = get_version(package_name)
 
 if package_version <= '0.6.3':
     vllm_mode = 'customized'
-    from .vllm_rollout import vLLMRollout
+else:
+    # newer vllm runs through the SPMD adapter (verl/third_party/vllm/vllm_spmd/llm.py),
+    # which exposes the same interface to vllm_rollout.py
+    vllm_mode = 'spmd'
+from .vllm_rollout import vLLMRollout
 # else:
 #     vllm_mode = 'spmd'
 #     from .vllm_rollout_spmd import vLLMRollout

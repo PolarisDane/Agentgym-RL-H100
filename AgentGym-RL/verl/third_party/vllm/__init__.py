@@ -50,8 +50,9 @@ elif package_version == '0.6.3':
 elif vs.parse(package_version) >= vs.parse('0.6.6.post2.dev252+g8027a724'):
     # From 0.6.6.post2 on, vllm supports SPMD inference
     # See https://github.com/vllm-project/vllm/pull/12071
+    # vllm_version stays None; LLM is an adapter exposing the 0.6.3 wrapper API.
 
-    from vllm import LLM
+    from .vllm_spmd.llm import LLM
     from vllm.distributed import parallel_state
     from .vllm_spmd.dtensor_weight_loaders import load_dtensor_weights
 else:
