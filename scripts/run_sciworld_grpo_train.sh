@@ -2,6 +2,10 @@
 
 set -euo pipefail
 
+# Same soft-RLIMIT_NOFILE issue as run_sciworld_env_service.sh: each rollout opens
+# one HTTP client per trajectory.
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TRAIN_CODE_DIR="${ROOT}/AgentGym-RL"
 CONDA_SH="${CONDA_SH:-/usr/local/miniconda3/etc/profile.d/conda.sh}"
@@ -279,6 +283,15 @@ THINK_REMINDER_ENABLE="${THINK_REMINDER_ENABLE:-False}"
 # HCA action-only ρ scoring: score on the action tokens (after the
 # delimiter) instead of the whole Thought+Action turn. Default OFF.
 
+# ===== Separate-AF-LoRA control (默认关；关闭时与改动前逐字节一致) =====
+# plan_forecast 的 CE 只更新这个 LoRA，policy backbone 拿不到 forecast 梯度，
+# 用来区分"收益来自共享参数"还是"有个好 forecaster 就够了"。
+AF_LORA_ENABLE="${AF_LORA_ENABLE:-False}"
+AF_LORA_RANK="${AF_LORA_RANK:-64}"
+AF_LORA_ALPHA="${AF_LORA_ALPHA:-128}"
+AF_LORA_LR="${AF_LORA_LR:-1e-4}"
+AF_LORA_TARGETS="${AF_LORA_TARGETS:-q_proj,k_proj,v_proj,o_proj,gate_proj,up_proj,down_proj}"
+
 WMC_COEFF="${WMC_COEFF:-0}"
 WMC_TYPE="${WMC_TYPE:-fixed}"
 WMC_START_COEFF="${WMC_START_COEFF:-0.001}"
@@ -484,6 +497,11 @@ exec env \
     +actor_rollout_ref.actor.plan_format_reward_clip="${PLAN_FORMAT_REWARD_CLIP}" \
     +actor_rollout_ref.actor.plan_format_reward_penalty_only="${PLAN_FORMAT_REWARD_PENALTY_ONLY}" \
     +actor_rollout_ref.actor.plan_format_reward_warmup_steps="${PLAN_FORMAT_REWARD_WARMUP_STEPS}" \
+    +actor_rollout_ref.actor.af_lora_enable="${AF_LORA_ENABLE}" \
+    +actor_rollout_ref.actor.af_lora_rank="${AF_LORA_RANK}" \
+    +actor_rollout_ref.actor.af_lora_alpha="${AF_LORA_ALPHA}" \
+    +actor_rollout_ref.actor.af_lora_lr="${AF_LORA_LR}" \
+    +actor_rollout_ref.actor.af_lora_targets="'${AF_LORA_TARGETS}'" \
     actor_rollout_ref.actor.world_model_coeff="${WMC_COEFF}" \
     actor_rollout_ref.actor.world_model.enable="${WM_ENABLE}" \
     actor_rollout_ref.actor.world_model.env_predict_prompt="${WM_ENV_PREDICT_PROMPT}" \

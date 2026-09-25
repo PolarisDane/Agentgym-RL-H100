@@ -2,6 +2,11 @@
 
 set -euo pipefail
 
+# tmux sessions inherit the tmux server's soft RLIMIT_NOFILE (1024 on some boxes).
+# Each SciWorld env leaks ~1 pipe fd, so at 32 envs/server/step the server hits
+# EMFILE around step 28 and /create returns an error (KeyError: 'id' in the client).
+ulimit -n "$(ulimit -Hn)" 2>/dev/null || true
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA_SH="${CONDA_SH:-/usr/local/miniconda3/etc/profile.d/conda.sh}"
 SCIWORLD_ENV="${SCIWORLD_ENV:-agentenv-sciworld}"
