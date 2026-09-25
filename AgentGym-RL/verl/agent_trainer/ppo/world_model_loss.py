@@ -335,12 +335,25 @@ def compute_world_model_sft_loss_from_logits(
     #
     # 样本之间的相对关系在 micro_batch=1 时发生在**梯度累加**层面（加法），
     # 不是在 micro-batch 内部取平均，所以正确做法是让 w_i 缩放该样本的整份损失。
+    # Per-sample mean CE, then the mean over samples -- NOT one mean over the
+    # micro-batch's pooled tokens. The two agree exactly at micro_batch=1 (a single
+    # sample's pooled mean IS its own mean), so every earlier run is bit-identical,
+    # but only this form makes the accumulated gradient independent of how the
+    # mini-batch is cut into micro-batches:
+    #   micro=1: Σ_i (coef/B)·∇(S_i/n_i)
+    #   micro=m: Σ_g (coef/G)·∇(1/m)Σ_{i∈g}(S_i/n_i)  = the same (G=B/m)
+    # Pooling the tokens instead would weight a sample by its LENGTH inside its own
+    # micro-batch, which is why micro_batch had to stay 1 before. With this form the
+    # SFT pass can run micro_batch>1 -- it was 51% of a sciworld step at micro=1.
+    tok_per_sample = shift_mask.sum(dim=-1)                       # [B]
+    valid = tok_per_sample > 0                                    # padded rows: none
+    if not bool(valid.any()):
+        return tok_loss.sum() * 0.0                               # keeps the graph alive
+    per_sample_ce = tok_loss.sum(dim=-1) / tok_per_sample.clamp(min=1)
     if sample_weight is None:
-        denom = shift_mask.sum().clamp(min=1.0)
-        return tok_loss.sum() / denom
-    w = sample_weight.to(tok_loss.dtype).view(-1, 1)      # [B,1] 广播到 [B,T]
-    denom = shift_mask.sum().clamp(min=1.0)               # 注意：不乘 w
-    return (tok_loss * w).sum() / denom
+        return per_sample_ce[valid].mean()
+    w = sample_weight.to(tok_loss.dtype).view(-1)                 # [B]
+    return (per_sample_ce * w)[valid].mean()
 
 
 def compute_traj_lm_loss(log_prob, response_mask, obs_mask, row_mask=None):

@@ -1297,6 +1297,10 @@ class RayPPOTrainer(object):
             success_threshold=float(actor_cfg.get('sft_ablation_success_threshold', 0.5)),
             max_length=int(actor_cfg.get('sft_ablation_max_length', 4096)),
             max_samples_per_trajectory=actor_cfg.get('sft_ablation_max_samples_per_traj', None),
+            # 'turn' clones the whole assistant turn (Thought included; standard RFT),
+            # 'action' only the bare action command -- plan-forecast's target at k=1.
+            target=str(actor_cfg.get('sft_ablation_target', 'turn')),
+            env=str(self.config.actor_rollout_ref.agentgym.get('task_name', '')),
         )
         if assembled is None:
             return None, meta

@@ -174,6 +174,24 @@ PE_CREDIT_WINS_ONLY="${PE_CREDIT_WINS_ONLY:-True}"
 PE_CLF_ENV="${PE_CLF_ENV:-alfworld}"
 # Plan-forecast auxiliary SFT (DEFAULT OFF): each step predict the realized next-K
 # action commands (current included). Separate forward, CE loss * coef, no PG.
+# ---- success-filtered SFT (RFT) control: GRPO + SFT on this step's winning
+# trajectories. Mutually exclusive with plan_forecast (the trainer asserts it).
+# target: turn (clone the whole assistant turn, Thought included -- standard RFT)
+#       | action (only the bare action command; plan-forecast's target at k=1)
+SFT_ABLATION_ENABLE="${SFT_ABLATION_ENABLE:-False}"
+SFT_ABLATION_COEF="${SFT_ABLATION_COEF:-0.01}"
+SFT_ABLATION_GATE="${SFT_ABLATION_GATE:-wins}"
+SFT_ABLATION_SUCCESS_THRESHOLD="${SFT_ABLATION_SUCCESS_THRESHOLD:-0.5}"
+SFT_ABLATION_MAX_LENGTH="${SFT_ABLATION_MAX_LENGTH:-4096}"
+SFT_ABLATION_TARGET="${SFT_ABLATION_TARGET:-turn}"
+SFT_ABLATION_MAX_SAMPLES_PER_TRAJ="${SFT_ABLATION_MAX_SAMPLES_PER_TRAJ:-}"
+# micro-batch of the SFT pass (plan_forecast / sft_ablation / world-model share it).
+# Empty = fall through to ppo_micro_batch_size_per_gpu. Since 2026-09-25 the SFT CE is
+# a per-sample mean averaged over samples, so the accumulated gradient is bit-identical
+# whatever this is set to (verified: max elementwise grad diff 0.0 for micro 1/2/4/8);
+# it only trades GPU memory for fewer backward passes. The SFT pass was 51% of a
+# sciworld step at micro=1.
+SFT_MICRO_BATCH_SIZE_PER_GPU="${SFT_MICRO_BATCH_SIZE_PER_GPU:-}"
 PLAN_FORECAST_ENABLE="${PLAN_FORECAST_ENABLE:-True}"
 PLAN_FORECAST_COEF="${PLAN_FORECAST_COEF:-0.01}"
 PLAN_FORECAST_K="${PLAN_FORECAST_K:-3}"
@@ -460,6 +478,14 @@ exec env \
     +actor_rollout_ref.actor.pe_omega_explore="${PE_OMEGA_EXPLORE}" \
     +actor_rollout_ref.actor.pe_credit_wins_only="${PE_CREDIT_WINS_ONLY}" \
     +actor_rollout_ref.actor.pe_clf_env="${PE_CLF_ENV}" \
+    +actor_rollout_ref.actor.sft_ablation_enable="${SFT_ABLATION_ENABLE}" \
+    +actor_rollout_ref.actor.sft_ablation_coef="${SFT_ABLATION_COEF}" \
+    +actor_rollout_ref.actor.sft_ablation_gate="${SFT_ABLATION_GATE}" \
+    +actor_rollout_ref.actor.sft_ablation_success_threshold="${SFT_ABLATION_SUCCESS_THRESHOLD}" \
+    +actor_rollout_ref.actor.sft_ablation_max_length="${SFT_ABLATION_MAX_LENGTH}" \
+    +actor_rollout_ref.actor.sft_ablation_target="${SFT_ABLATION_TARGET}" \
+    ${SFT_ABLATION_MAX_SAMPLES_PER_TRAJ:+ +actor_rollout_ref.actor.sft_ablation_max_samples_per_traj="${SFT_ABLATION_MAX_SAMPLES_PER_TRAJ}"} \
+    ${SFT_MICRO_BATCH_SIZE_PER_GPU:+ +actor_rollout_ref.actor.world_model_micro_batch_size_per_gpu="${SFT_MICRO_BATCH_SIZE_PER_GPU}"} \
     +actor_rollout_ref.actor.plan_forecast_enable="${PLAN_FORECAST_ENABLE}" \
     +actor_rollout_ref.actor.plan_forecast_coef="${PLAN_FORECAST_COEF}" \
     +actor_rollout_ref.actor.plan_forecast_k="${PLAN_FORECAST_K}" \
