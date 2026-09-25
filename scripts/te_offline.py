@@ -28,6 +28,33 @@ from verl.agent_trainer.ppo.temporal_ensemble import (  # noqa: E402
 from verl.workers.rollout.schemas import _action_token_mask  # noqa: E402
 
 
+def load_af_lora(model, path: str):
+    """交叉 TE 用：把 AF-LoRA 适配器挂到模型上（默认不启用，只有 enabled() 块里生效）。
+
+    训练时 LoRA 建在 FSDP 包装后的模块上，保存的 key 带 _fsdp_wrapped_module 前缀；
+    这里挂到普通 HF 模型上，需要把前缀去掉后再对齐。
+    """
+    import importlib.util as _ilu
+    from pathlib import Path as _P
+    _p = _P(__file__).resolve().parent.parent / "AgentGym-RL" / "verl" / "agent_trainer" / "ppo" / "af_lora.py"
+    _sp = _ilu.spec_from_file_location("_af_lora", _p)
+    _m = _ilu.module_from_spec(_sp); _sp.loader.exec_module(_m)
+    d = torch.load(path, map_location="cpu", weights_only=False)
+    lora = _m.AFLoRA(model, rank=int(d["rank"]), alpha=float(d["alpha"]),
+                     targets=tuple(d["targets"]), dtype=torch.float32,
+                     device=next(model.parameters()).device)
+    def clean(k):
+        return k.replace("_fsdp_wrapped_module__", "").replace("__fsdp_wrapped_module__", "")
+    sd = {clean(k): v.float() for k, v in d["lora"].items()}
+    missing = [k for k in lora.state_dict() if k not in sd]
+    if missing:
+        raise KeyError(f"af_lora key mismatch, e.g. {missing[:2]} not in {list(sd)[:2]}")
+    lora.load_state_dict(sd)
+    lora.attach()
+    print(f"[te_offline] af_lora loaded from {path}: {len(lora.A)} adapters, step {d.get('global_step')}")
+    return lora
+
+
 def load_trajs(d: str, limit: int = 0):
     out = []
     import re as _re
@@ -47,7 +74,7 @@ def load_trajs(d: str, limit: int = 0):
 
 
 @torch.no_grad()
-def te_for(model, tok, trajs, k, eta, device, max_traj=0, skip_invalid=True):
+def te_for(model, tok, trajs, k, eta, device, max_traj=0, skip_invalid=True, af_lora=None):
     """返回 (gain_tok_mean, te_kl_mean, n_targets, n_pos)."""
     gains, npos = [], 0
     kls = {}
@@ -112,7 +139,11 @@ def te_for(model, tok, trajs, k, eta, device, max_traj=0, skip_invalid=True):
         for s in samples:
             ids = s["input_ids"].unsqueeze(0).to(device)
             am = s["attention_mask"].unsqueeze(0).to(device)
-            out = model(input_ids=ids, attention_mask=am).logits
+            if af_lora is not None:
+                with af_lora.enabled():
+                    out = model(input_ids=ids, attention_mask=am).logits
+            else:
+                out = model(input_ids=ids, attention_mask=am).logits
             slp = slot_logprobs_from_logits(out, ids, [s["slot_spans"]])[0]
             tk_ids, tk_prs = slot_topk_from_logits(out, ids, [s["slot_spans"]])
             src = s["src_turn"]
@@ -225,6 +256,7 @@ def main():
     p.add_argument("--max-traj", type=int, default=40)
     p.add_argument("--skip-own", action="store_true",
                    help="只算 fixed 口径，跳过 own（own 已证明不可用，省一半时间）")
+    p.add_argument("--af-lora", default="", help="name=path,...：该模型的成员前向启用此 LoRA（交叉 TE）")
     p.add_argument("--out", default="/data1/logs/te_offline_result.json")
     a = p.parse_args()
 
@@ -241,6 +273,11 @@ def main():
         tok = AutoTokenizer.from_pretrained(mp, trust_remote_code=True)
         model = AutoModelForCausalLM.from_pretrained(
             mp, torch_dtype=torch.bfloat16, device_map="cuda", trust_remote_code=True).eval()
+        af_lora = None
+        if a.af_lora:
+            _map = dict(x.split("=", 1) for x in a.af_lora.split(","))
+            if name in _map:
+                af_lora = load_af_lora(model, _map[name])
         r = {}
         own = [] if a.skip_own else load_trajs(trajs_d[name], a.max_traj)
         if a.skip_own:
@@ -254,7 +291,7 @@ def main():
                         "per_traj": pt}
             print(f"  own   gain={g:+.4f} kl={kl:.4f} kl90={kl90:.4f}  targets={n}")
         if fixed:
-            g2, n2, npos2, qm2, pm2, pt2, kl2, kl902 = te_for(model, tok, fixed, a.k, a.eta, "cuda", a.max_traj)
+            g2, n2, npos2, qm2, pm2, pt2, kl2, kl902 = te_for(model, tok, fixed, a.k, a.eta, "cuda", a.max_traj, af_lora=af_lora)
             r["fixed"] = {"gain_tok": g2, "n_targets": n2, "n_pos": npos2, "n_traj": len(fixed),
                           "logqF_tok": qm2, "logp0_tok": pm2, "kl": kl2, "kl90": kl902,
                           "per_traj": pt2}
