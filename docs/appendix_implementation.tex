@@ -1,0 +1,189 @@
+% Appendix: implementation details (conversation handling, prompts, rewards).
+% Written against the Agentgym-RL-H100 code base (branch cyx_dev).
+% Numbers quoted as "our runs" are the SciWorld / Qwen2.5-7B-Instruct configuration.
+
+\section{Implementation Details}
+\label{app:impl}
+
+\subsection{Multi-turn Sequence Construction}
+\label{app:seq}
+
+Our treatment of the interaction history differs from the common practice of
+re-rendering the whole dialogue with the tokenizer's chat template at every turn. We
+maintain \emph{one} token sequence that is extended in place, and the sequence the
+policy is trained on is byte-identical to the context the sampler saw. We describe the
+construction first, then why the distinction matters.
+
+\paragraph{One growing sequence.}
+A trajectory is held in a single \texttt{RolloutHandler} that carries, in lockstep, the
+token ids and five aligned masks: the attention mask, the position ids, a \emph{loss}
+mask, an \emph{observation} mask, and per-token \emph{turn ids}. The episode starts from
+the environment's standing instruction and its fixed acknowledgement
+(\S\ref{app:prompts}), and each round appends
+\begin{enumerate}[nosep]
+  \item the assistant turn: \verb|<|im_start|>assistant\n| $+$ the sampled response $+$ \verb|<|im_end|>|, and
+  \item the observation turn: \verb|<|im_start|>user\n| $+$ the environment string $+$ \verb|<|im_end|>|.
+\end{enumerate}
+Prefix, body and suffix are tokenized \emph{separately} and concatenated. Encoding the
+concatenated string instead would let byte-pair merges cross the boundaries and silently
+change the token ids of text that was already in the context.
+
+\paragraph{Only action tokens carry gradient.}
+The loss mask is $1$ on the tokens the policy generated and $0$ on the instruction, on
+every observation, and on all template scaffolding. The same mask is used as the
+\texttt{response\_mask} for the policy-gradient loss, for the KL term and for the
+advantage, so environment text is never a prediction target and never contributes to the
+objective; the observation mask is its complement over the response span and exists for
+the auxiliary losses. Turn ids record which action turn each response token belongs to,
+which is what lets a turn-level quantity be aggregated from token-level ones.
+
+\paragraph{Generation context $\equiv$ training context.}
+For models whose chat template is stateful, the standard "re-render each turn" pipeline
+makes the sequence that the sampler conditioned on ($G$) and the sequence that the
+gradient is computed on ($T$) diverge. We measured this on Qwen3-8B: the template drops
+the empty \verb|<think></think>| block from \emph{historical} assistant turns while the
+incrementally built sequence keeps it, and a hard-coded default system prompt appeared in
+one path only. The gap grew by four tokens per turn ($+21$, $+25$, $+29$, $+33$, $+37$
+tokens after one to five turns), and after fifty training steps the same response scored
+under $T$ and under $G$ differed by $-8$ to $-63$ nats per turn. PPO cannot see this: the
+importance ratio is formed from two quantities that are both computed under $T$, so the
+correction silently trains off-policy. In our runs it ended in ratio blow-up
+(\texttt{pg\_loss} $\sim\!10^{9}$, gradient norm $\sim\!10^{13}$, then NaN) around step
+$50$--$70$.
+
+We therefore feed the sampler the training sequence itself, and append the sampler's raw
+output token ids back into that sequence rather than decoding to text and re-encoding.
+The round trip is not identity: on $1.2\%$ of responses the re-encoded segmentation
+differs (e.g.\ \texttt{[}, \texttt{cher}, \texttt{ry}, \texttt{]} becomes \texttt{[ch},
+\texttt{erry}, \texttt{]}), which would train the model on tokens it never emitted. With
+this path $G \equiv T$ holds by construction; we verified it on $203$ turns from $30$
+trajectories, and confirmed that models with a stateless template take the original code
+path byte-for-byte unchanged ($600$ recorded quantities identical over $40$ trajectories).
+
+\paragraph{Truncation.}
+A trajectory is capped at $\texttt{max\_model\_len} = \min(8192, \texttt{prompt} +
+\texttt{response})$ tokens and the response span at $4096$; the sequence and all five
+masks are truncated together, so alignment cannot drift.
+
+\subsection{Prompts}
+\label{app:prompts}
+
+\paragraph{Task instruction (SciWorld).}
+Taken verbatim from AgentGym; it is the first user turn and is followed by a fixed
+assistant acknowledgement, after which the first observation arrives.
+
+\begin{quote}\small\ttfamily
+You are an agent for science world. Every round I will give you an observation, you have
+to respond an action based on the observation to finish the given task. Here are the
+actions you may take: [\{"action": "open/close OBJ", "description": "open/close a
+container"\}, \{"action": "de/activate OBJ", \ldots\}, \{"action": "look around",
+"description": "describe the current room"\}, \ldots]
+\end{quote}
+\begin{quote}\small\ttfamily
+(assistant) OK. I'll follow your instructions and try my best to solve the task.
+\end{quote}
+
+\noindent The per-episode goal (``Your task is to measure the melting point of tin
+\ldots'') arrives as the first observation, not as part of the instruction.
+
+\paragraph{Action-forecast prompt.}
+The auxiliary objective is trained on a separate sequence: the dialogue truncated to an
+observation $o_t$, followed by a synthetic user turn, with the realized next-$K$ actions
+as the target (one per line, no other text).
+
+\begin{quote}\small\ttfamily
+Plan ahead: list the next \{k\} actions you will take to make progress on the task,
+starting with the action you take right now, one action per line.
+\end{quote}
+
+\noindent The current action is deliberately included as the first item. Targets are
+built from the executed actions; with \texttt{skip\_invalid} enabled, actions the
+environment rejected (``No known action matches that input.'') are dropped from the
+target list, and the horizon is clamped at the end of the episode so the target never
+promises more steps than the episode contained.
+
+\paragraph{World-model prompt.}
+Used only by the observation-prediction auxiliary loss, disabled in the runs reported
+here ($\texttt{world\_model\_coeff} = 0$):
+
+\begin{quote}\small\ttfamily
+You are now acting as a world model. Based on the conversation above and the agent's last
+action, predict the environment's next observation.
+\end{quote}
+
+\paragraph{Unused prompt variants.}
+The code also supports an inline plan instruction (the agent emits a plan inside each
+turn, which therefore receives policy gradient), a per-turn plan or ``think'' reminder
+appended to every observation, and a sub-goal variant of the forecast target. All are
+disabled in the reported runs.
+
+\subsection{Reward and Objective}
+\label{app:reward}
+
+\paragraph{Binary outcome reward.}
+SciWorld returns a score in $[0, 100]$ (and $-100$ on a lost episode). We binarize it:
+the trajectory earns $1$ if the episode terminated \emph{and} reached the full score, and
+$0$ otherwise. For WebShop the same rule applies with the environment's continuous score
+at $1.0$. No shaping, no per-step bonus, and no length penalty is used.
+\[
+r(\tau) = \mathbb{1}\left[\texttt{done} \wedge \texttt{score} \ge \texttt{score}_{\max}\right]
+\]
+The scalar is written on the \emph{last valid response token} of the trajectory, so the
+token-level reward tensor is zero everywhere else. The evaluation protocol uses the same
+criterion, so training reward and reported success rate are the same quantity.
+
+\paragraph{Advantage.}
+With GRPO, the $n$ rollouts of one task form a group; the trajectory score is
+standardized within the group, $\hat{A} = (r - \mu_{\text{group}}) /
+(\sigma_{\text{group}} + \epsilon)$, $\epsilon = 10^{-6}$, and broadcast to every token
+of the response under the loss mask. A group whose rollouts all succeed or all fail
+therefore contributes no gradient. Singleton groups are assigned $\mu = 0$, $\sigma = 1$.
+
+\paragraph{Objective.}
+The policy loss is the clipped PPO surrogate over the masked response tokens, plus an
+entropy bonus and a KL penalty to the frozen initial policy (low-variance $k_3$
+estimator), both applied under the same mask:
+\[
+\mathcal{L} = \mathcal{L}_{\text{PPO}} - \beta_{H} \mathcal{H} + \beta_{\mathrm{KL}}
+\mathrm{KL}\!\left(\pi_\theta \,\|\, \pi_{\text{ref}}\right).
+\]
+The auxiliary action-forecast loss is a separate optimizer step on its own batch
+(cross-entropy on the target tokens only, scaled by its coefficient); it does not enter
+the policy-gradient term.
+
+\subsection{Hyper-parameters}
+\label{app:hparams}
+
+\begin{table}[h]
+\centering\small
+\begin{tabular}{llll}
+\toprule
+prompts / step & $16$ & rollouts / prompt ($n$) & $8$ \\
+mini-batch & $8$ & micro-batch / GPU & $1$ \\
+PPO epochs & $1$ & max interaction turns & $20$ \\
+policy lr & $10^{-6}$ (constant) & $\beta_{\mathrm{KL}}$ & $0.001$ \\
+$\beta_{H}$ & $0.001$ & clip range & $0.2$ \\
+prompt / response length & $2048$ / $4096$ & context, tokens per turn & $8192$ / $512$ \\
+forecast horizon $K$ & $3$ & forecast coefficient & $0.01$ \\
+training steps & $200$ & rollout precision & bfloat16 \\
+\bottomrule
+\end{tabular}
+\caption{Training configuration. Reported runs use Qwen2.5-7B-Instruct on four GPUs;
+gradients are computed in FSDP with gradient checkpointing, and generation is served by
+vLLM inside the same processes.}
+\end{table}
+
+\paragraph{Evaluation.}
+The held-out split has $200$ tasks. Each is run once with temperature $1.0$, at most $30$
+turns and $200$ tokens per turn, and scored with the training criterion. Note that the
+per-turn budget is smaller at evaluation than during training ($512$): a turn that runs
+past it is cut before its action line and rejected by the environment, which penalizes
+verbose policies. We report this because it is a property of the protocol rather than of
+the policies, and it affects systems unevenly.
+
+\paragraph{Known off-by-one.}
+Two conventions inherited from the training framework are worth stating so that step
+indices are reproducible: \texttt{total\_training\_steps} $= N$ performs $N-1$ updates,
+and the learning-rate schedule yields $0$ on the very first step, so that step
+accumulates optimizer state without changing the weights. Every run reported here,
+including the baselines, is affected identically.
