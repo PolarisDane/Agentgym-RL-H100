@@ -360,6 +360,29 @@ class ActorRolloutRefWorker(Worker):
                                               actor_optimizer=self.actor_optimizer,
                                               model_config=self.actor_model_config)
 
+            # Separate-AF-LoRA control (default off -> byte-identical to before):
+            # the plan-forecast loss trains this adapter instead of the backbone.
+            if bool(self.config.actor.get('af_lora_enable', False)):
+                from verl.agent_trainer.ppo.af_lora import AFLoRA, DEFAULT_TARGETS
+                _t = str(self.config.actor.get('af_lora_targets', '') or '')
+                targets = tuple(x for x in _t.split(',') if x) or DEFAULT_TARGETS
+                self.af_lora = AFLoRA(self.actor_module_fsdp,
+                                      rank=int(self.config.actor.get('af_lora_rank', 64)),
+                                      alpha=float(self.config.actor.get('af_lora_alpha', 128.0)),
+                                      targets=targets)
+                self.af_lora.attach()
+                self.af_lora_optimizer = torch.optim.AdamW(
+                    self.af_lora.parameters(),
+                    lr=float(self.config.actor.get('af_lora_lr', 1e-4)),
+                    betas=(0.9, 0.999), weight_decay=0.0)
+                self.actor.af_lora = self.af_lora
+                self.actor.af_lora_optimizer = self.af_lora_optimizer
+                if self.rank == 0:
+                    print(f"[af_lora] {len(self.af_lora.A)} adapters, "
+                          f"{self.af_lora.num_parameters()/1e6:.1f}M params, "
+                          f"rank={self.af_lora.rank} alpha={self.af_lora.alpha} "
+                          f"lr={self.config.actor.get('af_lora_lr', 1e-4)}", flush=True)
+
         if self._is_rollout:
             self.rollout, self.rollout_sharding_manager = self._build_rollout()
 
@@ -941,6 +964,16 @@ class ActorRolloutRefWorker(Worker):
                                                 global_step=global_step,
                                                 remove_previous_ckpt=remove_previous_ckpt,
                                                 max_ckpt_to_keep=max_ckpt_to_keep)
+
+        # AF-LoRA lives outside FSDP, so the checkpoint manager knows nothing about
+        # it; it is replicated across ranks, so rank 0 alone writes it.
+        if getattr(self, 'af_lora', None) is not None and self.rank == 0:
+            import os
+            torch.save({'lora': self.af_lora.state_dict_cpu(),
+                        'optimizer': self.af_lora_optimizer.state_dict(),
+                        'rank': self.af_lora.rank, 'alpha': self.af_lora.alpha,
+                        'targets': list(self.af_lora.targets), 'global_step': global_step},
+                       os.path.join(local_path, 'af_lora.pt'))
 
         torch.distributed.barrier()
         if self._is_offload_param:

@@ -849,6 +849,9 @@ class DataParallelPPOActor(BasePPOActor):
         # metric namespace: 'plan_forecast' (default) or 'sft_ablation' when the
         # RFT-style control reuses this same optimizer path (mutually exclusive).
         mp = data.meta_info.get('sft_metric_prefix', 'plan_forecast')
+        # Separate-AF-LoRA control: the forecast loss updates ONLY the LoRA adapter,
+        # the policy backbone gets nothing (see agent_trainer/ppo/af_lora.py).
+        af_lora = getattr(self, 'af_lora', None)
         select_keys = ['input_ids', 'attention_mask', 'position_ids', 'loss_mask']
         if 'loss_weight' in data.batch.keys():   # per-sample group-norm weight
             select_keys.append('loss_weight')
@@ -867,6 +870,10 @@ class DataParallelPPOActor(BasePPOActor):
             gradient_accumulation = max(1, len(micro_batches))
 
             self.actor_optimizer.zero_grad()
+            if af_lora is not None:
+                af_lora.zero_grad(set_to_none=True)
+                from verl.agent_trainer.ppo.af_lora import policy_fingerprint
+                _pol_before = policy_fingerprint(self.actor_module)
             for micro in micro_batches:
                 micro = micro.cuda()
                 loss_mask = micro['loss_mask']
@@ -878,22 +885,28 @@ class DataParallelPPOActor(BasePPOActor):
                 # 聚合结果上 —— 后者在 micro_batch>1 时只是整体缩放，无法区分样本。
                 lw = micro['loss_weight'] if 'loss_weight' in micro.keys() else None
 
-                with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-                    output = self.actor_module(
-                        input_ids=micro['input_ids'],
-                        attention_mask=micro['attention_mask'],
-                        position_ids=micro['position_ids'],
-                        use_cache=False,
-                    )
-                    pf_loss = compute_world_model_sft_loss_from_logits(
-                        logits=output.logits,
-                        labels=micro['input_ids'],
-                        loss_mask=loss_mask,
-                        sample_weight=lw,
-                    )
+                from contextlib import nullcontext
+                # The adapter must stay enabled through the BACKWARD as well:
+                # gradient checkpointing re-runs the forward during backward, and a
+                # recompute without the LoRA delta would silently give wrong grads.
+                _lora_ctx = af_lora.enabled() if af_lora is not None else nullcontext()
+                with _lora_ctx:
+                    with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                        output = self.actor_module(
+                            input_ids=micro['input_ids'],
+                            attention_mask=micro['attention_mask'],
+                            position_ids=micro['position_ids'],
+                            use_cache=False,
+                        )
+                        pf_loss = compute_world_model_sft_loss_from_logits(
+                            logits=output.logits,
+                            labels=micro['input_ids'],
+                            loss_mask=loss_mask,
+                            sample_weight=lw,
+                        )
 
-                loss = coef * pf_loss / gradient_accumulation
-                loss.backward()
+                    loss = coef * pf_loss / gradient_accumulation
+                    loss.backward()
 
                 append_to_dict(metrics, {
                     f'{mp}/sft_loss': pf_loss.detach().item(),
@@ -906,8 +919,30 @@ class DataParallelPPOActor(BasePPOActor):
                     f'{mp}/valid_tokens': loss_mask.sum().detach().item(),
                 })
 
-            grad_norm = self._optimizer_step()
-            append_to_dict(metrics, {f'{mp}/grad_norm': grad_norm.detach().item()})
+            if af_lora is None:
+                grad_norm = self._optimizer_step()
+                append_to_dict(metrics, {f'{mp}/grad_norm': grad_norm.detach().item()})
+            else:
+                # Discard the backbone grads FSDP just produced (a flat parameter
+                # cannot be partially frozen, so they are computed and thrown away),
+                # then step the adapter only.
+                self.actor_optimizer.zero_grad(set_to_none=True)
+                af_lora.all_reduce_grads()
+                lora_gn = torch.nn.utils.clip_grad_norm_(af_lora.parameters(),
+                                                         max_norm=self.config.grad_clip)
+                if torch.isfinite(lora_gn):
+                    self.af_lora_optimizer.step()
+                else:
+                    print(f"[af_lora] non-finite grad_norm ({lora_gn}); skipping step", flush=True)
+                af_lora.zero_grad(set_to_none=True)
+                _pol_delta = (policy_fingerprint(self.actor_module) - _pol_before).abs().max().item()
+                append_to_dict(metrics, {
+                    f'{mp}/grad_norm': float(lora_gn.detach().item()),
+                    'af_lora/grad_norm': float(lora_gn.detach().item()),
+                    'af_lora/lr': float(self.af_lora_optimizer.param_groups[0]['lr']),
+                    # must stay exactly 0: the forecast loss may not move the policy
+                    'af_lora/policy_delta': _pol_delta,
+                })
 
         self.actor_optimizer.zero_grad()
         return metrics
